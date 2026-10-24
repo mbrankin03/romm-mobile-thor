@@ -1,10 +1,12 @@
 import * as SAF from '@joplin/react-native-saf-x';
 import RNFetchBlob from "react-native-blob-util";
+import RNFS from 'react-native-fs';
 import * as FileSystem from 'expo-file-system';
 import { useCallback, useMemo, useState } from 'react';
 import { Platform } from 'react-native';
 import { RomFile } from '../services/api';
 import { PlatformFolder, usePlatformFolders } from './usePlatformFolders';
+import { resolveAndroidPath } from '../services/storageService';
 
 
 interface RomHash {
@@ -12,104 +14,196 @@ interface RomHash {
     lastModified: number;
 }
 
+export const matchesRomFile = (diskFileName: string, romFileName: string): boolean => {
+    if (!diskFileName || !romFileName) return false;
+
+    const getDiscId = (f: string) => {
+        const m = f.match(/\b(disc|disk|cd|part|side|track)\s*([0-9a-z]+)\b/i);
+        return m ? `${m[1].toLowerCase()}_${m[2].toLowerCase()}` : '';
+    };
+    const isAux = (f: string) => /\.(m3u|m3u8|cue|gdi|txt|nfo|pdf)$/i.test(f);
+
+    // Playlists/cues must only match playlists/cues; game files only game files
+    if (isAux(diskFileName) !== isAux(romFileName)) return false;
+
+    // Discs/parts must match strictly (e.g. Disc 1 != Disc 2 or no-disc)
+    if (getDiscId(diskFileName) !== getDiscId(romFileName)) return false;
+
+    const fLower = diskFileName.toLowerCase().trim();
+    const rLower = romFileName.toLowerCase().trim();
+    if (fLower === rLower) return true;
+
+    const fNoExt = fLower.replace(/\.[^/.]+$/, '');
+    const rNoExt = rLower.replace(/\.[^/.]+$/, '');
+    if (fNoExt === rNoExt) return true;
+
+    // Strip region/version tags like (USA), (Europe), [Rev 1], but preserve disc tags
+    const clean = (s: string) => s.replace(/\.[^/.]+$/, '')
+        .replace(/[\(\[\{](?!\s*(?:disc|disk|cd|part|side|track)\b)[^\)\]\}]*[\)\]\}]/gi, '')
+        .replace(/[^a-zA-Z0-9]/g, '')
+        .toLowerCase()
+        .trim();
+
+    const fClean = clean(diskFileName);
+    const rClean = clean(romFileName);
+    return !!(fClean && rClean && fClean === rClean);
+};
+
 export const useRomFileSystem = () => {
     const { searchPlatformFolder } = usePlatformFolders();
     const [fileChecks, setFileChecks] = useState<Record<number, boolean>>({});
     const [checking, setChecking] = useState<Record<number, boolean>>({});
 
-    const checkIfRomExists = useCallback(async (romFile: RomFile, platformFolder: PlatformFolder): Promise<boolean> => {
-        // Check if there are files
+    const checkIfRomExists = useCallback(async (romFile: RomFile, platformFolder: PlatformFolder | PlatformFolder[]): Promise<boolean> => {
         if (!romFile) {
-            console.log('No files available for this ROM');
             return false;
         }
 
-        if (!platformFolder || !platformFolder.folderUri) {
+        const fileId = romFile.id || romFile.rom_id;
+        const folders = Array.isArray(platformFolder) ? platformFolder : [platformFolder];
+        const validFolders = folders.filter(f => f && f.folderUri);
+
+        if (validFolders.length === 0) {
             console.warn('No platform folder configured. Cannot check if ROM exists.');
             return false;
         }
 
         try {
+            interface FileInfo {
+                name: string;
+                size?: number;
+            }
+            let fileList: FileInfo[] = [];
 
-            const fileNameWithoutExtension = romFile.file_name.replace(/\.[^/.]+$/, '');
-
-
-            var fileList;
-
-            if (Platform.OS === 'android') {
-                fileList = (await SAF.listFiles(platformFolder.folderUri)).map(file => file.name);
-            } else {
-                // For iOS, use expo-file-system
-                fileList = await FileSystem.readDirectoryAsync(platformFolder.folderUri);
+            for (const folder of validFolders) {
+                try {
+                    if (Platform.OS === 'android') {
+                        const directPath = resolveAndroidPath(folder.folderUri);
+                        if (directPath && (await RNFS.exists(directPath))) {
+                            const dirItems = await RNFS.readDir(directPath);
+                            fileList.push(...dirItems.map(item => ({ name: item.name, size: item.size || 1 })));
+                        } else {
+                            const files = await SAF.listFiles(folder.folderUri);
+                            fileList.push(...files.map(file => ({ name: file.name, size: (file as any).size ?? 1 })));
+                        }
+                    } else {
+                        const names = await FileSystem.readDirectoryAsync(folder.folderUri);
+                        fileList.push(...names.map(name => ({ name, size: 1 })));
+                    }
+                } catch (e) {
+                    console.warn(`Error reading folder ${folder.folderUri}:`, e);
+                }
             }
 
-            // Check if the ROM file exists in the platform folder
-            const romExists = fileList.some(file => file.includes(fileNameWithoutExtension));
+            const romExists = fileList.some(file => {
+                if (file.size !== undefined && file.size === 0) return false;
+                return matchesRomFile(file.name, romFile.file_name || '');
+            });
 
-            if (romExists) {
-                console.log('ROM already exists in the folder:', romFile.file_name);
-                setFileChecks(prev => ({ ...prev, [romFile.rom_id]: true }));
-                return true;
+            if (fileId) {
+                setFileChecks(prev => ({ ...prev, [fileId]: romExists }));
             }
-
-            setFileChecks(prev => ({ ...prev, [romFile.rom_id]: false }));
-            return false;
+            return romExists;
 
         } catch (error) {
             console.error('Error checking existing files:', error);
-            const exists = false;
-            setFileChecks(prev => ({ ...prev, [romFile.rom_id]: exists }));
-            return exists;
+            if (fileId) {
+                setFileChecks(prev => ({ ...prev, [fileId]: false }));
+            }
+            return false;
         }
 
+    }, []);
 
-    }, [searchPlatformFolder]);
-
-    const isRomDownloaded = useCallback((romFile: RomFile): boolean => {
-        return fileChecks[romFile.rom_id] || false;
+    const isRomDownloaded = useCallback((romFile?: RomFile): boolean => {
+        if (!romFile) return false;
+        const fileId = romFile.id || romFile.rom_id;
+        if (!fileId) return false;
+        return fileChecks[fileId] || false;
     }, [fileChecks]);
 
-    const isCheckingRom = useCallback((romFile: RomFile): boolean => {
-        return checking[romFile.rom_id] || false;
+    const isCheckingRom = useCallback((romFile?: RomFile): boolean => {
+        if (!romFile) return false;
+        const fileId = romFile.id || romFile.rom_id;
+        if (!fileId) return false;
+        return checking[fileId] || false;
     }, [checking]);
 
-    const checkMultipleRoms = useCallback(async (romsFiles: RomFile[], platformFolder: PlatformFolder): Promise<void> => {
-        // Only check ROMs that haven't been checked yet
-        const romsFilesToCheck = romsFiles.filter(romFile =>
-            fileChecks[romFile.rom_id] === undefined && !checking[romFile.rom_id]
-        );
+    const checkMultipleRoms = useCallback(async (romsFiles: RomFile[], platformFolder: PlatformFolder | PlatformFolder[]): Promise<void> => {
+        if (!romsFiles || romsFiles.length === 0) return;
+        const folders = Array.isArray(platformFolder) ? platformFolder : [platformFolder];
+        const validFolders = folders.filter(f => f && f.folderUri);
+        if (validFolders.length === 0) return;
 
-        if (romsFilesToCheck.length === 0) {
-            return;
+        try {
+            interface FileInfo {
+                name: string;
+                size?: number;
+            }
+            let fileList: FileInfo[] = [];
+
+            for (const folder of validFolders) {
+                try {
+                    if (Platform.OS === 'android') {
+                        const directPath = resolveAndroidPath(folder.folderUri);
+                        if (directPath && (await RNFS.exists(directPath))) {
+                            const dirItems = await RNFS.readDir(directPath);
+                            fileList.push(...dirItems.map(item => ({ name: item.name, size: item.size || 1 })));
+                        } else {
+                            const files = await SAF.listFiles(folder.folderUri);
+                            fileList.push(...files.map(file => ({ name: file.name, size: (file as any).size ?? 1 })));
+                        }
+                    } else {
+                        const names = await FileSystem.readDirectoryAsync(folder.folderUri);
+                        fileList.push(...names.map(name => ({ name, size: 1 })));
+                    }
+                } catch (e) {
+                    console.warn(`Error reading folder ${folder.folderUri}:`, e);
+                }
+            }
+
+            const newChecks: Record<number, boolean> = {};
+
+            for (const romFile of romsFiles) {
+                if (!romFile) continue;
+                const fileId = romFile.id || romFile.rom_id;
+                if (!fileId) continue;
+
+                const exists = fileList.some(file => {
+                    if (file.size !== undefined && file.size === 0) return false;
+                    return matchesRomFile(file.name, romFile.file_name || '');
+                });
+
+                newChecks[fileId] = exists;
+            }
+
+            setFileChecks(prev => ({ ...prev, ...newChecks }));
+        } catch (error) {
+            console.error('Error batch checking files:', error);
         }
+    }, []);
 
-        // list all files in the platform folder
-        if (!platformFolder || !platformFolder.folderUri) {
-            console.warn('No platform folder configured for:', platformFolder.platformSlug);
-            return;
-        }
+    const refreshRomCheck = useCallback(async (romFile?: RomFile, platformFolder?: PlatformFolder | PlatformFolder[]): Promise<boolean> => {
+        if (!romFile) return false;
+        const fileId = romFile.id || romFile.rom_id;
+        if (!fileId) return false;
 
-        await Promise.all(romsFilesToCheck.map(async (romFile, _) => {
-            await checkIfRomExists(romFile, platformFolder);
-        }));
-    }, [checkIfRomExists, fileChecks, checking]);
-
-    const refreshRomCheck = useCallback(async (romFile: RomFile, platformFolder: PlatformFolder): Promise<boolean> => {
-
-        console.log('Refreshing ROM check for:', romFile.file_name);
-
-        if (fileChecks[romFile.rom_id] == true) {
-            // If already checked and exists, return true
+        if (fileChecks[fileId] == true) {
             return true;
         }
 
+        if (!platformFolder) return false;
         return await checkIfRomExists(romFile, platformFolder);
-    }, [checkIfRomExists]);
+    }, [checkIfRomExists, fileChecks]);
 
     const resetRomsCheck = useCallback((romsFiles: RomFile[]) => {
-        romsFiles.forEach((romFile, _) => {
-            setFileChecks(prev => ({ ...prev, [romFile.rom_id]: false }));
-            setChecking(prev => ({ ...prev, [romFile.rom_id]: false }));
+        if (!romsFiles) return;
+        romsFiles.forEach((romFile) => {
+            const fileId = romFile?.id || romFile?.rom_id;
+            if (fileId) {
+                setFileChecks(prev => ({ ...prev, [fileId]: false }));
+                setChecking(prev => ({ ...prev, [fileId]: false }));
+            }
         });
     }, []);
 

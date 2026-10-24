@@ -15,6 +15,7 @@ import {
     View
 } from 'react-native';
 import { WebView } from 'react-native-webview';
+import { GamepadFocusable } from '../../components/GamepadFocusable';
 import { PublicRoute } from '../../components/ProtectedRoute';
 import { useAuth } from '../../contexts/AuthContext';
 import { useToast } from '../../contexts/ToastContext';
@@ -26,7 +27,7 @@ export default function LoginScreen() {
         username: '',
         password: '',
     });
-    const [serverUrl, setServerUrl] = useState<string>('http://romm:8080');
+    const [serverUrl, setServerUrl] = useState<string>('http://192.168.1.147:8082');
     const [connectionStatus, setConnectionStatus] = useState<'checking' | 'connected' | 'failed'>('checking');
     const [showSsoWebView, setShowSsoWebView] = useState(false);
     const { login, isLoading, error, clearError, refreshUser } = useAuth();
@@ -297,7 +298,7 @@ export default function LoginScreen() {
                             />
                         </View>
 
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={[styles.loginButton, isLoading && styles.disabledButton]}
                             onPress={handleLogin}
                             disabled={isLoading}
@@ -307,7 +308,7 @@ export default function LoginScreen() {
                             ) : (
                                 <Text style={styles.loginButtonText}>{t('login')}</Text>
                             )}
-                        </TouchableOpacity>
+                        </GamepadFocusable>
 
                         <View style={styles.divider}>
                             <View style={styles.dividerLine} />
@@ -315,13 +316,13 @@ export default function LoginScreen() {
                             <View style={styles.dividerLine} />
                         </View>
 
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={[styles.ssoButton, isLoading && styles.disabledButton]}
                             onPress={handleSsoLogin}
                             disabled={isLoading}
                         >
                             <Text style={styles.ssoButtonText}>{t('loginWithSso')}</Text>
-                        </TouchableOpacity>
+                        </GamepadFocusable>
                     </View>
                 </ScrollView>
             </KeyboardAvoidingView>

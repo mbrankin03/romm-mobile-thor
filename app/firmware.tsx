@@ -13,6 +13,9 @@ import {
     TouchableOpacity,
     View
 } from 'react-native';
+import { GamepadFocusable } from '@/components/GamepadFocusable';
+import { GamepadHints } from '@/components/GamepadHints';
+import { useGamepadNavigation } from '@/hooks/useGamepadNavigation';
 import { useToast } from '../contexts/ToastContext';
 import { useStorageAccessFramework } from '../hooks/useStorageAccessFramework';
 import { useTranslation } from '../hooks/useTranslation';
@@ -27,6 +30,7 @@ export default function FirmwareScreen() {
     const [isLoading, setIsLoading] = useState(true);
     const [downloadingId, setDownloadingId] = useState<number | null>(null);
     const [downloadProgress, setDownloadProgress] = useState(0);
+    useGamepadNavigation();
 
     useEffect(() => {
         loadFirmware();
@@ -142,7 +146,7 @@ export default function FirmwareScreen() {
                 </View>
             </View>
 
-            <TouchableOpacity
+            <GamepadFocusable
                 style={[styles.downloadButton, downloadingId === item.id && styles.disabledButton]}
                 onPress={() => handleDownload(item)}
                 disabled={downloadingId !== null}
@@ -152,19 +156,19 @@ export default function FirmwareScreen() {
                 ) : (
                     <Ionicons name="download-outline" size={20} color="#fff" />
                 )}
-            </TouchableOpacity>
+            </GamepadFocusable>
         </View>
     );
 
     return (
         <View style={styles.container}>
             <View style={styles.header}>
-                <TouchableOpacity
+                <GamepadFocusable
                     style={styles.backButton}
                     onPress={() => router.back()}
                 >
                     <Ionicons name="arrow-back" size={24} color="#fff" />
-                </TouchableOpacity>
+                </GamepadFocusable>
                 <Text style={styles.headerTitle}>{t('firmware') || 'Firmware'}</Text>
             </View>
 
@@ -185,6 +189,7 @@ export default function FirmwareScreen() {
                     }
                 />
             )}
+            <GamepadHints selectText="Download Firmware" backText="Back" />
         </View>
     );
 }

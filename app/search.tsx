@@ -18,6 +18,9 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ProtectedRoute } from '../components/ProtectedRoute';
 import { useDownload } from '../contexts/DownloadContext';
 import { useToast } from '../contexts/ToastContext';
+import { GamepadFocusable } from '@/components/GamepadFocusable';
+import { GamepadHints } from '@/components/GamepadHints';
+import { useGamepadNavigation } from '@/hooks/useGamepadNavigation';
 import { useDynamicColumns } from '../hooks/useDynamicColumns';
 import { useRomFileSystem } from '../hooks/useRomFileSystem';
 import { useRomsSearch } from '../hooks/useRoms';
@@ -42,7 +45,7 @@ export default function SearchScreen() {
     const [sortDirection, setSortDirection] = useState<SearchOrderDirection>('asc');
     const { showErrorToast, showInfoToast } = useToast();
     const { downloadRom } = useRomDownload();
-    const { searchPlatformFolder } = usePlatformFolders();
+    const { searchPlatformFolder, getAllPlatformFolders } = usePlatformFolders();
     const { completedDownloads, isRomDownloading } = useDownload();
     const { isRomDownloaded, isCheckingRom, refreshRomCheck } = useRomFileSystem();
     const { columns, cardWidth, isLandscape } = useDynamicColumns();
@@ -59,6 +62,7 @@ export default function SearchScreen() {
         clearSearch: clearSearchResults
     } = useRomsSearch();
     const insets = useSafeAreaInsets();
+    useGamepadNavigation();
 
     const sortOptions: SortOption[] = [
         { key: 'name', label: t('sortByName') },
@@ -83,9 +87,13 @@ export default function SearchScreen() {
     useEffect(() => {
         if (searchResults.length > 0) {
             Promise.all(searchResults.map(async rom => {
-                const platformFolder = await searchPlatformFolder({ slug: rom.platform_slug, name: rom.platform_name } as Platform);
-                if (!platformFolder) return;
-                refreshRomCheck(rom.files[0], platformFolder);
+                const folders = await getAllPlatformFolders({ slug: rom.platform_slug, name: rom.platform_name } as Platform);
+                const platformFolder = folders.length > 0 ? folders[0] : await searchPlatformFolder({ slug: rom.platform_slug, name: rom.platform_name } as Platform);
+                if (folders.length > 0) {
+                    refreshRomCheck(rom.files[0], folders);
+                } else if (platformFolder) {
+                    refreshRomCheck(rom.files[0], platformFolder);
+                }
             }));
         }
     }, [searchResults.length, completedDownloads.length]);
@@ -101,7 +109,7 @@ export default function SearchScreen() {
     }, [error, showErrorToast, t]);
 
     const handleDownload = async (rom: Rom) => {
-        if (!rom) return;
+        if (!rom || !rom.files || rom.files.length === 0) return;
 
         try {
             await downloadRom(rom, rom.files[0], { slug: rom.platform_slug, name: rom.platform_name } as Platform);
@@ -217,9 +225,8 @@ export default function SearchScreen() {
         const allDownloaded = downloadedCount === totalVersions && totalVersions > 0;
 
         return (
-            <TouchableOpacity
+            <GamepadFocusable
                 style={[styles.romCard, { width: cardWidth }]}
-                activeOpacity={0.8}
                 onPress={() => router.push(`/game/${rom.id}`)}
             >
                 <View style={[styles.romImageContainer, { height: cardHeight }]}>
@@ -235,6 +242,18 @@ export default function SearchScreen() {
                     )}
 
                     {/* Status Badges */}
+                    <View style={styles.topLeftBadges}>
+                        {Boolean(rom.ra_id) && (
+                            <View style={styles.raTrophyBadge}>
+                                <Ionicons name="trophy" size={Math.min(13, cardWidth * 0.10)} color="#FFD700" />
+                            </View>
+                        )}
+                        {anyDownloading && (
+                            <View style={styles.downloadingBadge}>
+                                <Ionicons name="download" size={Math.min(18, cardWidth * 0.12)} color="#FFFFFF" />
+                            </View>
+                        )}
+                    </View>
                     {anyDownloaded && (
                         <View style={styles.completedBadge}>
                             <Ionicons name="checkmark-circle" size={Math.min(24, cardWidth * 0.16)} color="#34C759" />
@@ -248,11 +267,6 @@ export default function SearchScreen() {
                     {anyChecking && !anyDownloaded && (
                         <View style={styles.checkingBadge}>
                             <ActivityIndicator size={Math.min(16, cardWidth * 0.11)} color="#FF9500" />
-                        </View>
-                    )}
-                    {anyDownloading && (
-                        <View style={styles.downloadingBadge}>
-                            <Ionicons name="download" size={Math.min(20, cardWidth * 0.13)} color="#FFFFFF" />
                         </View>
                     )}
 
@@ -282,7 +296,7 @@ export default function SearchScreen() {
                         {(rom.fs_size_bytes / (1024 * 1024)).toFixed(1)} MB
                     </Text>
                 </View>
-            </TouchableOpacity>
+            </GamepadFocusable>
         );
     };
 
@@ -358,12 +372,12 @@ export default function SearchScreen() {
             <View style={[styles.container, { paddingTop: insets.top }]}>
                 {/* Header with integrated search bar */}
                 <View style={styles.header}>
-                    <TouchableOpacity
+                    <GamepadFocusable
                         style={styles.backButton}
                         onPress={() => router.back()}
                     >
                         <Ionicons name="arrow-back" size={24} color="#fff" />
-                    </TouchableOpacity>
+                    </GamepadFocusable>
                     <View style={styles.searchInputContainer}>
                         <Ionicons name="search" size={18} color="#666" style={styles.searchIcon} />
                         <TextInput
@@ -385,12 +399,12 @@ export default function SearchScreen() {
                             </TouchableOpacity>
                         )}
                     </View>
-                    <TouchableOpacity
+                    <GamepadFocusable
                         style={styles.sortButton}
                         onPress={() => setShowSortModal(true)}
                     >
                         <Ionicons name="funnel-outline" size={20} color="#fff" />
-                    </TouchableOpacity>
+                    </GamepadFocusable>
                 </View>
 
                 {/* Search Results */}
@@ -441,6 +455,7 @@ export default function SearchScreen() {
                 </View>
 
                 <SortModal />
+                <GamepadHints selectText="Inspect Game" backText="Back" />
             </View>
         </ProtectedRoute>
     );
@@ -630,13 +645,26 @@ const styles = StyleSheet.create({
         borderRadius: 12,
         padding: 4,
     },
-    downloadingBadge: {
+    topLeftBadges: {
         position: 'absolute',
         top: 8,
         left: 8,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        zIndex: 10,
+    },
+    downloadingBadge: {
         backgroundColor: 'rgba(0, 122, 255, 0.9)',
         borderRadius: 12,
         padding: 4,
+    },
+    raTrophyBadge: {
+        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+        borderRadius: 12,
+        padding: 4,
+        borderWidth: 1,
+        borderColor: 'rgba(255, 215, 0, 0.4)',
     },
     modalOverlay: {
         flex: 1,

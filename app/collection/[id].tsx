@@ -1,8 +1,9 @@
 import { DownloadStatusBar } from '@/components/DownloadStatusBar';
+import { DynamicConsoleBackdrop, updateBackdrop } from '@/components/DynamicConsoleBackdrop';
 import { useRomDownload } from '@/hooks/useRomDownload';
 import { Ionicons } from '@expo/vector-icons';
 import { router, useLocalSearchParams } from 'expo-router';
-import React, { useEffect, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import {
     ActivityIndicator,
     Alert,
@@ -17,18 +18,25 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { ProtectedRoute } from '../../components/ProtectedRoute';
+import { useCollections } from '../../hooks/useCollections';
 import { useDownload } from '../../contexts/DownloadContext';
 import { useToast } from '../../contexts/ToastContext';
+import { GamepadFocusable } from '@/components/GamepadFocusable';
+import { GamepadHints } from '@/components/GamepadHints';
+import { useGamepadNavigation } from '@/hooks/useGamepadNavigation';
 import { useDynamicColumns } from '../../hooks/useDynamicColumns';
 import { usePlatformFolders } from '../../hooks/usePlatformFolders';
 import { useRomFileSystem } from '../../hooks/useRomFileSystem';
 import { useRomsByCollection } from '../../hooks/useRoms';
 import { useTranslation } from '../../hooks/useTranslation';
 import { apiClient, Collection as ApiCollection, Platform, Rom } from '../../services/api';
+import { useFavorites } from '../../services/favoritesService';
+import { soundService } from '@/services/soundService';
+import { formatBytes, validateDiskSpace } from '../../services/storageService';
 
-interface CollectionScreenProps { }
+type FilterMode = 'all' | 'downloaded' | 'favorites';
 
-export default function CollectionScreen({ }: CollectionScreenProps) {
+export default function CollectionScreen() {
     const { id, virtual } = useLocalSearchParams<{ id: string; virtual?: string }>();
     const collectionId = id;
     const isVirtual = virtual === 'true';
@@ -40,9 +48,131 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
     const { activeDownloads, addRomToQueue, isRomDownloading, completedDownloads } = useDownload();
     const { downloadRom } = useRomDownload();
     const { showErrorToast, showInfoToast, showSuccessToast } = useToast();
-    const { platformFolders, searchPlatformFolder } = usePlatformFolders();
+    const { platformFolders, searchPlatformFolder, getAllPlatformFolders } = usePlatformFolders();
     const { checkMultipleRoms, isRomDownloaded, isCheckingRom, refreshRomCheck } = useRomFileSystem();
     const insets = useSafeAreaInsets();
+
+    const { userCollections, generatedCollections } = useCollections(true);
+    const [filterMode, setFilterMode] = useState<FilterMode>('all');
+    const [sortBy, setSortBy] = useState<'name_asc' | 'name_desc' | 'size_desc' | 'size_asc'>('name_asc');
+    const { isFavorite } = useFavorites();
+
+    const flatListRef = React.useRef<FlatList>(null);
+    const scrollOffsetRef = React.useRef<number>(0);
+    const layoutHeightRef = React.useRef<number>(600);
+
+    const cycleSort = useCallback(() => {
+        setSortBy(current => {
+            switch (current) {
+                case 'name_asc': return 'name_desc';
+                case 'name_desc': return 'size_desc';
+                case 'size_desc': return 'size_asc';
+                case 'size_asc': return 'name_asc';
+                default: return 'name_asc';
+            }
+        });
+    }, []);
+
+    const cycleFilter = useCallback(() => {
+        setFilterMode(current => {
+            if (current === 'all') return 'downloaded';
+            if (current === 'downloaded') return 'favorites';
+            return 'all';
+        });
+    }, []);
+
+    const handlePageDown = useCallback(() => {
+        const jump = Math.max(300, layoutHeightRef.current * 0.8);
+        scrollOffsetRef.current += jump;
+        flatListRef.current?.scrollToOffset({
+            offset: scrollOffsetRef.current,
+            animated: true,
+        });
+        soundService.playFocus();
+        return true;
+    }, []);
+
+    const handlePageUp = useCallback(() => {
+        const jump = Math.max(300, layoutHeightRef.current * 0.8);
+        scrollOffsetRef.current = Math.max(0, scrollOffsetRef.current - jump);
+        flatListRef.current?.scrollToOffset({
+            offset: scrollOffsetRef.current,
+            animated: true,
+        });
+        soundService.playFocus();
+        return true;
+    }, []);
+
+    const getSortLabel = (sort: 'name_asc' | 'name_desc' | 'size_desc' | 'size_asc') => {
+        switch (sort) {
+            case 'name_asc': return 'A → Z';
+            case 'name_desc': return 'Z → A';
+            case 'size_desc': return 'Size (Largest)';
+            case 'size_asc': return 'Size (Smallest)';
+        }
+    };
+
+    const allCollections = useMemo(() => {
+        const list: { id: string; isVirtual: boolean; name: string }[] = [];
+        if (userCollections && userCollections.length > 0) {
+            userCollections.forEach(c => {
+                if ((c.rom_count || 0) > 0) {
+                    list.push({ id: String(c.id), isVirtual: false, name: c.name });
+                }
+            });
+        }
+        if (generatedCollections) {
+            Object.values(generatedCollections).forEach(arr => {
+                arr.forEach(c => {
+                    if ((c.rom_count || 0) > 0) {
+                        list.push({ id: String(c.id), isVirtual: true, name: c.name });
+                    }
+                });
+            });
+        }
+        return list;
+    }, [userCollections, generatedCollections]);
+
+    const cycleCollection = (direction: 'next' | 'prev') => {
+        if (allCollections.length <= 1) return;
+        const currentIdx = allCollections.findIndex(c => String(c.id) === String(collectionId));
+        if (currentIdx === -1) return;
+        const nextIdx = direction === 'next'
+            ? (currentIdx + 1) % allCollections.length
+            : (currentIdx - 1 + allCollections.length) % allCollections.length;
+        const nextCol = allCollections[nextIdx];
+        router.replace({
+            pathname: `/collection/${nextCol.id}`,
+            params: { virtual: nextCol.isVirtual ? 'true' : 'false' }
+        });
+    };
+
+    useGamepadNavigation({
+        onButtonL1: () => {
+            cycleCollection('prev');
+            return true;
+        },
+        onButtonR1: () => {
+            cycleCollection('next');
+            return true;
+        },
+        onButtonL2: () => {
+            handlePageUp();
+            return true;
+        },
+        onButtonR2: () => {
+            handlePageDown();
+            return true;
+        },
+        onButtonX: () => {
+            cycleFilter();
+            return true;
+        },
+        onButtonY: () => {
+            cycleSort();
+            return true;
+        },
+    });
 
     // Dynamic columns based on screen orientation and device size
     const { columns, cardWidth, isLandscape } = useDynamicColumns();
@@ -79,10 +209,13 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
     // Check filesystem for existing ROMs when ROMs are loaded
     useEffect(() => {
         Promise.all(roms.map(async rom => {
-            const platformFolder = await searchPlatformFolder({ name: rom.platform_name, slug: rom.platform_slug } as Platform);
-            if (!platformFolder) return;
-            // Check all files for each ROM
-            Promise.all(rom.files.map(file => refreshRomCheck(file, platformFolder)));
+            if (!rom.files || rom.files.length === 0) return;
+            const folders = await getAllPlatformFolders({ name: rom.platform_name, slug: rom.platform_slug } as Platform);
+            const platformFolder = folders.length > 0 ? folders[0] : await searchPlatformFolder({ name: rom.platform_name, slug: rom.platform_slug } as Platform);
+            const targetFolders = folders.length > 0 ? folders : (platformFolder ? [platformFolder] : []);
+            if (targetFolders.length > 0) {
+                Promise.all(rom.files.map(file => refreshRomCheck(file, targetFolders)));
+            }
         }));
     }, [roms, platformFolders]);
 
@@ -103,6 +236,7 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
                 if (roms && roms.length > 0) {
                     console.log('Force refreshing all ROM checks in collection');
                     for (const rom of roms) {
+                        if (!rom.files || rom.files.length === 0) continue;
                         const platformFolder = await searchPlatformFolder({ name: rom.platform_name, slug: rom.platform_slug } as Platform);
                         if (!platformFolder) continue;
                         await refreshRomCheck(rom.files[0], platformFolder);
@@ -118,7 +252,7 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
     };
 
     const handleDownload = async (rom: Rom) => {
-        if (!rom) return;
+        if (!rom || !rom.files || rom.files.length === 0) return;
 
         try {
             await downloadRom(rom, rom.files[0], { name: rom.platform_name, slug: rom.platform_slug } as Platform);
@@ -168,16 +302,30 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
         }
 
         // Filter out ROMs that are already being downloaded or already exist on filesystem
-        const romsToDownload = roms.filter(rom => !isRomDownloading(rom.files[0]) && !isRomDownloaded(rom.files[0]));
+        const romsToDownload = roms.filter(rom => {
+            const firstFile = rom.files?.[0];
+            if (!firstFile) return false;
+            return !isRomDownloading(firstFile) && !isRomDownloaded(firstFile);
+        });
 
         if (romsToDownload.length === 0) {
             showInfoToast(t('allRomsDownloaded'), t('info'));
             return;
         }
 
+        const totalBatchBytes = romsToDownload.reduce((sum, r) => {
+            return sum + (r.fs_size_bytes || r.files?.[0]?.file_size_bytes || 0);
+        }, 0);
+
+        const check = await validateDiskSpace(totalBatchBytes);
+        if (!check.canDownload) {
+            Alert.alert('Insufficient Storage', check.warningMessage);
+            return;
+        }
+
         Alert.alert(
             t('confirmDownload'),
-            t('downloadAllRomsQuestionCollection', { count: romsToDownload.length.toString(), collection: collection.name }),
+            `Download ${romsToDownload.length} games (${formatBytes(totalBatchBytes)}) from ${collection.name}?\n\nAvailable device storage: ${formatBytes(check.freeBytes)}`,
             [
                 { text: t('cancel'), style: 'cancel' },
                 {
@@ -209,102 +357,94 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
         );
     };
 
-    const RomCard = ({ rom }: { rom: Rom & { isEmpty?: boolean } }) => {
-        if (rom.isEmpty) {
-            return <View style={[styles.gameCard, { width: cardWidth }]} />;
-        }
+    const handleCardPress = useCallback((id: number) => {
+        router.push(`/game/${id}`);
+    }, []);
 
-        const hasImage = rom.url_cover && rom.url_cover.trim() !== '';
-
-        // Calculate card height based on width to maintain aspect ratio
-        const cardHeight = Math.floor(cardWidth * 1.4); // 1.4 aspect ratio
-
-        // Helper function to count downloaded versions
-        const getDownloadedVersionsCount = () => {
-            if (!rom.files || rom.files.length === 0) return 0;
-            return rom.files.filter(file => isRomDownloaded(file)).length;
-        };
-
-        // Helper function to check if any version is downloading
-        const isAnyVersionDownloading = () => {
-            if (!rom.files || rom.files.length === 0) return false;
-            return rom.files.some(file => isRomDownloading(file));
-        };
-
-        // Helper function to check if any version is being checked
-        const isAnyVersionChecking = () => {
-            if (!rom.files || rom.files.length === 0) return false;
-            return rom.files.some(file => isCheckingRom(file));
-        };
-
-        const downloadedCount = getDownloadedVersionsCount();
-        const totalVersions = rom.files?.length || 0;
-        const hasMultipleVersions = totalVersions > 1;
-        const anyDownloaded = downloadedCount > 0;
-        const anyDownloading = isAnyVersionDownloading();
-        const anyChecking = isAnyVersionChecking();
-        const allDownloaded = downloadedCount === totalVersions && totalVersions > 0;
+    const renderRomItem = useCallback(({ item, index }: { item: Rom & { isEmpty?: boolean }; index: number }) => {
+        const files = item.files || [];
+        const downloadedCount = files.filter(f => isRomDownloaded(f)).length;
+        const isDownloaded = downloadedCount > 0;
+        const isDownloading = files.some(f => isRomDownloading(f));
+        const isChecking = files.some(f => isCheckingRom(f));
 
         return (
-            <Pressable
-                style={[styles.gameCard, { width: cardWidth }]}
-                onPress={() => router.push(`/game/${rom.id}`)}
-            >
-                <View style={[styles.gameImageContainer, { height: cardHeight }]}>
-                    {hasImage ? (
-                        <Image
-                            source={{ uri: rom.url_cover }}
-                            style={styles.gameImage}
-                        />
-                    ) : (
-                        <View style={styles.placeholderContainer}>
-                            <Ionicons name="game-controller-outline" size={Math.min(32, cardWidth * 0.2)} color="#666" />
-                            <Text style={[styles.gameTitle, { fontSize: Math.min(14, cardWidth * 0.1) }]} numberOfLines={2}>
-                                {rom.name || rom.fs_name}
-                            </Text>
-                        </View>
-                    )}
-
-                    {/* Status Badges */}
-                    {anyDownloaded && (
-                        <View style={styles.completedBadge}>
-                            <Ionicons name="checkmark-circle" size={Math.min(24, cardWidth * 0.16)} color="#34C759" />
-                            {hasMultipleVersions && (
-                                <Text style={styles.versionCountBadge}>
-                                    {downloadedCount}/{totalVersions}
-                                </Text>
-                            )}
-                        </View>
-                    )}
-                    {anyChecking && !anyDownloaded && (
-                        <View style={styles.checkingBadge}>
-                            <ActivityIndicator size={Math.min(16, cardWidth * 0.11)} color="#FF9500" />
-                        </View>
-                    )}
-                    {anyDownloading && (
-                        <View style={styles.downloadingBadge}>
-                            <Ionicons name="download" size={Math.min(20, cardWidth * 0.13)} color="#FFFFFF" />
-                        </View>
-                    )}
-
-                    {/* Download Button - Only show if not all versions downloaded and none downloading */}
-                    {!anyDownloaded && !anyDownloading && (
-                        <View style={styles.romOverlay}>
-                            <TouchableOpacity
-                                style={[styles.downloadButton, {
-                                    width: Math.min(32, cardWidth * 0.21),
-                                    height: Math.min(32, cardWidth * 0.21)
-                                }]}
-                                onPress={() => handleDownload(rom)}
-                            >
-                                <Ionicons name="download-outline" size={Math.min(16, cardWidth * 0.11)} color="#fff" />
-                            </TouchableOpacity>
-                        </View>
-                    )}
-                </View>
-            </Pressable>
+            <RomCardItem
+                rom={item}
+                index={index}
+                cardWidth={cardWidth}
+                isDownloaded={isDownloaded}
+                isDownloading={isDownloading}
+                isChecking={isChecking}
+                isFavorite={isFavorite(item.id)}
+                downloadedCount={downloadedCount}
+                totalVersions={files.length}
+                onDownload={handleDownload}
+                onPress={handleCardPress}
+                onFocus={() => updateBackdrop({ imageUrl: item.url_cover, platformSlug: item.platform_slug })}
+            />
         );
-    };
+    }, [cardWidth, isRomDownloaded, isRomDownloading, isCheckingRom, isFavorite, handleDownload, handleCardPress]);
+
+    const isAnyFileDownloaded = useCallback((rom: Rom) => {
+        return (rom.files || []).some(f => isRomDownloaded(f));
+    }, [isRomDownloaded]);
+
+    const downloadedCount = useMemo(() => {
+        return roms.filter(isAnyFileDownloaded).length;
+    }, [roms, isAnyFileDownloaded]);
+
+    const favoritesCount = useMemo(() => {
+        return roms.filter(r => isFavorite(r.id)).length;
+    }, [roms, isFavorite]);
+
+    const filteredRoms = useMemo(() => {
+        let list = roms;
+        if (filterMode === 'downloaded') {
+            list = list.filter(isAnyFileDownloaded);
+        } else if (filterMode === 'favorites') {
+            list = list.filter(r => isFavorite(r.id));
+        }
+        const sorted = [...list];
+        sorted.sort((a, b) => {
+            if (sortBy === 'name_asc') {
+                const nameA = (a.name || a.fs_name || '').toLowerCase();
+                const nameB = (b.name || b.fs_name || '').toLowerCase();
+                return nameA.localeCompare(nameB);
+            }
+            if (sortBy === 'name_desc') {
+                const nameA = (a.name || a.fs_name || '').toLowerCase();
+                const nameB = (b.name || b.fs_name || '').toLowerCase();
+                return nameB.localeCompare(nameA);
+            }
+            if (sortBy === 'size_desc') {
+                const sizeA = a.fs_size_bytes || (a.files?.[0]?.file_size_bytes) || 0;
+                const sizeB = b.fs_size_bytes || (b.files?.[0]?.file_size_bytes) || 0;
+                return sizeB - sizeA;
+            }
+            if (sortBy === 'size_asc') {
+                const sizeA = a.fs_size_bytes || (a.files?.[0]?.file_size_bytes) || 0;
+                const sizeB = b.fs_size_bytes || (b.files?.[0]?.file_size_bytes) || 0;
+                return sizeA - sizeB;
+            }
+            return 0;
+        });
+        return sorted;
+    }, [roms, filterMode, sortBy, isAnyFileDownloaded, isFavorite]);
+
+    // Prepare data for FlatList with empty items to fill last row
+    const gridData = useMemo(() => {
+        const totalItems = filteredRoms.length;
+        const remainder = totalItems % columns;
+        if (remainder === 0) return filteredRoms;
+
+        const emptyItems = columns - remainder;
+        const paddedData = [...filteredRoms];
+        for (let i = 0; i < emptyItems; i++) {
+            paddedData.push({ id: `empty-${i}`, isEmpty: true } as any);
+        }
+        return paddedData;
+    }, [filteredRoms, columns]);
 
     if (loading && !collection) {
         return (
@@ -314,20 +454,6 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
             </View>
         );
     }
-
-    // Prepare data for FlatList with empty items to fill last row
-    const prepareGridData = (data: Rom[]) => {
-        const totalItems = data.length;
-        const remainder = totalItems % columns;
-        if (remainder === 0) return data;
-
-        const emptyItems = columns - remainder;
-        const paddedData = [...data];
-        for (let i = 0; i < emptyItems; i++) {
-            paddedData.push({ id: `empty-${i}`, isEmpty: true } as any);
-        }
-        return paddedData;
-    };
 
     // Footer component for loading more items
     const renderFooter = () => {
@@ -350,20 +476,33 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
     };
 
     // Calculate available ROMs to download
-    const availableToDownload = roms.filter(rom => !isRomDownloading(rom.files[0]) && !isRomDownloaded(rom.files[0])).length;
+    const availableToDownload = roms.filter(rom => {
+        const firstFile = rom.files?.[0];
+        if (!firstFile) return false;
+        return !isRomDownloading(firstFile) && !isRomDownloaded(firstFile);
+    }).length;
 
     return (
         <ProtectedRoute>
             <View style={styles.container}>
+                <DynamicConsoleBackdrop
+                    accentColor="#7E22CE"
+                />
                 {/* Header */}
                 <View style={[styles.header, { paddingTop: insets.top + 10 }]}>
                     <View style={styles.headerTop}>
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={styles.backButton}
-                            onPress={() => router.back()}
+                            onPress={() => {
+                                if (router.canGoBack()) {
+                                    router.back();
+                                } else {
+                                    router.replace('/');
+                                }
+                            }}
                         >
                             <Ionicons name="arrow-back" size={24} color="#fff" />
-                        </TouchableOpacity>
+                        </GamepadFocusable>
                         <View style={styles.headerInfo}>
                             <Text style={styles.headerTitle} numberOfLines={1}>
                                 {collection?.name || t('collection')}
@@ -373,7 +512,7 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
                             </Text>
                         </View>
                         <View style={styles.headerButtons}>
-                            <TouchableOpacity
+                            <GamepadFocusable
                                 style={[
                                     styles.downloadAllButton,
                                     availableToDownload === 0 && styles.downloadAllButtonDisabled
@@ -391,9 +530,58 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
                                         )}
                                     </>
                                 )}
-                            </TouchableOpacity>
+                            </GamepadFocusable>
                         </View>
                     </View>
+
+                    {/* Filter & Sort Bar */}
+                    <View style={styles.filterBar}>
+                        <TouchableOpacity
+                            style={[styles.filterPill, filterMode === 'all' && styles.filterPillActive]}
+                            onPress={() => setFilterMode('all')}
+                        >
+                            <Text style={[styles.filterPillText, filterMode === 'all' && styles.filterPillTextActive]}>
+                                All ({roms.length})
+                            </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.filterPill, filterMode === 'downloaded' && styles.filterPillActive]}
+                            onPress={() => setFilterMode('downloaded')}
+                        >
+                            <Ionicons
+                                name="checkmark-circle"
+                                size={14}
+                                color={filterMode === 'downloaded' ? '#00E5FF' : '#34C759'}
+                            />
+                            <Text style={[styles.filterPillText, filterMode === 'downloaded' && styles.filterPillTextActive]}>
+                                Downloaded ({downloadedCount})
+                            </Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                            style={[styles.filterPill, filterMode === 'favorites' && styles.filterPillActive]}
+                            onPress={() => setFilterMode('favorites')}
+                        >
+                            <Ionicons
+                                name="star"
+                                size={14}
+                                color={filterMode === 'favorites' ? '#FFD700' : '#EAB308'}
+                            />
+                            <Text style={[styles.filterPillText, filterMode === 'favorites' && styles.filterPillTextActive]}>
+                                Favorites ({favoritesCount})
+                            </Text>
+                        </TouchableOpacity>
+
+                        <TouchableOpacity
+                            style={[styles.filterPill, styles.filterPillActive, { marginLeft: 'auto' }]}
+                            onPress={cycleSort}
+                        >
+                            <Ionicons name="swap-vertical" size={14} color="#00E5FF" />
+                            <Text style={[styles.filterPillText, styles.filterPillTextActive]}>
+                                {getSortLabel(sortBy)}
+                            </Text>
+                        </TouchableOpacity>
+                    </View>
+
                     {collection?.description && (
                         <Text style={styles.description}>
                             {collection.description}
@@ -403,14 +591,22 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
 
                 {/* Roms Grid */}
                 <FlatList
-                    data={prepareGridData(roms)}
-                    renderItem={({ item }) => <RomCard rom={item} />}
+                    ref={flatListRef}
+                    data={gridData}
+                    renderItem={renderRomItem}
                     keyExtractor={(item) => item.id.toString()}
                     numColumns={columns}
                     key={`${columns}-${isLandscape}`} // Force re-render when columns or orientation change
                     columnWrapperStyle={columns > 1 ? styles.row : undefined}
                     contentContainerStyle={styles.gamesContainer}
                     showsVerticalScrollIndicator={false}
+                    onScroll={(e) => {
+                        scrollOffsetRef.current = e.nativeEvent.contentOffset.y;
+                    }}
+                    scrollEventThrottle={16}
+                    onLayout={(e) => {
+                        layoutHeightRef.current = e.nativeEvent.layout.height;
+                    }}
                     refreshControl={
                         <RefreshControl
                             refreshing={refreshing}
@@ -424,7 +620,11 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
                             <View style={styles.emptyContainer}>
                                 <Ionicons name="library-outline" size={64} color="#666" />
                                 <Text style={styles.emptyText}>
-                                    {t('noGamesInCollection')}
+                                    {filterMode === 'favorites'
+                                        ? 'No favorite games in this collection'
+                                        : filterMode === 'downloaded'
+                                            ? 'No downloaded games in this collection on your device'
+                                            : t('noGamesInCollection')}
                                 </Text>
                             </View>
                         ) : null
@@ -436,6 +636,14 @@ export default function CollectionScreen({ }: CollectionScreenProps) {
                 />
 
                 <DownloadStatusBar onPress={() => router.push('/downloads')} />
+                <GamepadHints hints={[
+                    { button: 'L1/R1', label: 'Collections' },
+                    { button: 'L2/R2', label: 'Page' },
+                    { button: 'X', label: `Filter: ${filterMode === 'all' ? 'All' : filterMode === 'downloaded' ? 'Downloaded' : 'Favorites'}` },
+                    { button: 'Y', label: `Sort: ${getSortLabel(sortBy)}` },
+                    { button: 'A', label: 'Select' },
+                    { button: 'B', label: 'Back' },
+                ]} />
             </View>
         </ProtectedRoute>
     );
@@ -492,19 +700,50 @@ const styles = StyleSheet.create({
         color: '#ccc',
         fontSize: 14,
         lineHeight: 20,
+        marginTop: 8,
+    },
+    filterBar: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 8,
+        marginTop: 8,
+    },
+    filterPill: {
+        flexDirection: 'row',
+        alignItems: 'center',
+        paddingHorizontal: 12,
+        paddingVertical: 6,
+        borderRadius: 16,
+        backgroundColor: '#161922',
+        borderWidth: 1,
+        borderColor: '#232736',
+        gap: 6,
+    },
+    filterPillActive: {
+        backgroundColor: '#1E293B',
+        borderColor: '#00E5FF',
+    },
+    filterPillText: {
+        color: '#94A3B8',
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    filterPillTextActive: {
+        color: '#FFFFFF',
     },
     gamesContainer: {
-        paddingHorizontal: 20,
-        paddingBottom: 20,
+        paddingHorizontal: 16,
+        paddingBottom: 24,
     },
     row: {
-        justifyContent: 'space-between',
+        justifyContent: 'flex-start',
+        gap: 12,
         paddingHorizontal: 0,
-        marginBottom: 15,
+        marginBottom: 12,
     },
     gameCard: {
-        marginTop: 20,
-        marginBottom: 15,
+        marginTop: 8,
+        marginBottom: 8,
     },
     gameImageContainer: {
         position: 'relative',
@@ -590,13 +829,47 @@ const styles = StyleSheet.create({
         shadowRadius: 3,
         elevation: 5,
     },
-    downloadingBadge: {
+    topLeftBadges: {
         position: 'absolute',
         top: 8,
         left: 8,
+        flexDirection: 'row',
+        alignItems: 'center',
+        gap: 4,
+        zIndex: 10,
+    },
+    downloadingBadge: {
         backgroundColor: 'rgba(0, 122, 255, 0.9)',
         borderRadius: 12,
         padding: 4,
+        shadowColor: '#000',
+        shadowOffset: {
+            width: 0,
+            height: 2,
+        },
+        shadowOpacity: 0.3,
+        shadowRadius: 3,
+        elevation: 5,
+    },
+    favoriteBadge: {
+        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+        borderRadius: 12,
+        padding: 4,
+        shadowColor: '#000',
+        shadowOffset: {
+            width: 0,
+            height: 2,
+        },
+        shadowOpacity: 0.3,
+        shadowRadius: 3,
+        elevation: 5,
+    },
+    raTrophyBadge: {
+        backgroundColor: 'rgba(0, 0, 0, 0.8)',
+        borderRadius: 12,
+        padding: 4,
+        borderWidth: 1,
+        borderColor: 'rgba(255, 215, 0, 0.4)',
         shadowColor: '#000',
         shadowOffset: {
             width: 0,
@@ -651,4 +924,118 @@ const styles = StyleSheet.create({
         color: '#999',
         fontSize: 14,
     },
+});
+
+interface RomCardItemProps {
+    rom: Rom & { isEmpty?: boolean };
+    index: number;
+    cardWidth: number;
+    isDownloaded: boolean;
+    isDownloading: boolean;
+    isChecking: boolean;
+    isFavorite?: boolean;
+    downloadedCount: number;
+    totalVersions: number;
+    onDownload: (rom: Rom) => void;
+    onPress: (id: number) => void;
+    onFocus?: () => void;
+}
+
+const RomCardItem = React.memo(({
+    rom,
+    index,
+    cardWidth,
+    isDownloaded,
+    isDownloading,
+    isChecking,
+    isFavorite,
+    downloadedCount,
+    totalVersions,
+    onDownload,
+    onPress,
+    onFocus,
+}: RomCardItemProps) => {
+    if (rom.isEmpty) {
+        return <View focusable={false} style={[styles.gameCard, { width: cardWidth }]} />;
+    }
+
+    const hasImage = !!(rom.url_cover && rom.url_cover.trim() !== '');
+    const cardHeight = Math.floor(cardWidth * 1.4);
+    const hasMultipleVersions = totalVersions > 1;
+
+    return (
+        <GamepadFocusable
+            style={[styles.gameCard, { width: cardWidth }]}
+            glowColor="#00E5FF"
+            focusScale={1.04}
+            onPress={() => onPress(rom.id)}
+            onFocus={onFocus}
+        >
+            <View style={[styles.gameImageContainer, { height: cardHeight }]}>
+                {hasImage ? (
+                    <Image
+                        source={{ uri: rom.url_cover }}
+                        style={styles.gameImage}
+                    />
+                ) : (
+                    <View style={styles.placeholderContainer}>
+                        <Ionicons name="game-controller-outline" size={Math.min(32, cardWidth * 0.2)} color="#666" />
+                        <Text style={[styles.gameTitle, { fontSize: Math.min(14, cardWidth * 0.1) }]} numberOfLines={2}>
+                            {rom.name || rom.fs_name}
+                        </Text>
+                    </View>
+                )}
+
+                {/* Status Badges */}
+                <View style={styles.topLeftBadges}>
+                    {isFavorite && (
+                        <View style={styles.favoriteBadge}>
+                            <Ionicons name="star" size={Math.min(14, cardWidth * 0.11)} color="#FFD700" />
+                        </View>
+                    )}
+                    {Boolean(rom.ra_id) && (
+                        <View style={styles.raTrophyBadge}>
+                            <Ionicons name="trophy" size={Math.min(13, cardWidth * 0.10)} color="#FFD700" />
+                        </View>
+                    )}
+                    {isDownloading && (
+                        <View style={styles.downloadingBadge}>
+                            <Ionicons name="download" size={Math.min(18, cardWidth * 0.12)} color="#FFFFFF" />
+                        </View>
+                    )}
+                </View>
+                {isDownloaded && (
+                    <View style={styles.completedBadge}>
+                        <Ionicons name="checkmark-circle" size={Math.min(24, cardWidth * 0.16)} color="#34C759" />
+                        {hasMultipleVersions && (
+                            <Text style={styles.versionCountBadge}>
+                                {downloadedCount}/{totalVersions}
+                            </Text>
+                        )}
+                    </View>
+                )}
+                {isChecking && !isDownloaded && (
+                    <View style={styles.checkingBadge}>
+                        <ActivityIndicator size={Math.min(16, cardWidth * 0.11)} color="#FF9500" />
+                    </View>
+                )}
+
+                {/* Download Button - Pressable with focusable={false} */}
+                {!isDownloaded && !isDownloading && (
+                    <View style={styles.romOverlay}>
+                        <Pressable
+                            focusable={false}
+                            style={[styles.downloadButton, {
+                                width: Math.min(32, cardWidth * 0.21),
+                                height: Math.min(32, cardWidth * 0.21)
+                            }]}
+                            onPress={() => onDownload(rom)}
+                        >
+                            <Ionicons name="download-outline" size={Math.min(16, cardWidth * 0.11)} color="#fff" />
+                        </Pressable>
+                    </View>
+                )}
+            </View>
+        </GamepadFocusable>
+    );
 });

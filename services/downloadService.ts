@@ -1,4 +1,4 @@
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import ReactNativeBlobUtil from 'react-native-blob-util';
 import { PlatformFolder } from '../hooks/usePlatformFolders';
@@ -37,7 +37,7 @@ class DownloadService {
     private maxConcurrentDownloads = 2;
     private downloadQueue: string[] = [];
     private activeDownloads: Set<string> = new Set();
-    private speedCalculationInterval: number | null = null;
+    private speedCalculationInterval: any = null;
 
     initialize(updateCallback: (downloads: DownloadItem[]) => void): void {
         this.updateCallback = updateCallback;

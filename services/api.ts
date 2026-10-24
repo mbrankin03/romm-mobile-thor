@@ -1,7 +1,7 @@
 import * as SecureStore from 'expo-secure-store';
 
 
-const DEFAULT_API_URL = 'http://romm:8080';
+const DEFAULT_API_URL = 'http://192.168.1.147:8082';
 
 // Authentication types
 export interface LoginCredentials {
@@ -93,6 +93,31 @@ export interface RomSibling {
     sort_comparator: string;
 }
 
+export interface RAGameRomAchievement {
+    ra_id: number;
+    title: string;
+    description: string;
+    points: number;
+    num_awarded?: number;
+    num_awarded_hardcore?: number;
+    badge_id?: string;
+    badge_url?: string;
+    badge_url_lock?: string;
+    badge_path?: string;
+    badge_path_lock?: string;
+    display_order?: number;
+    type?: string;
+}
+
+export interface RomRAMetadata {
+    first_release_date?: number | null;
+    genres?: string[];
+    companies?: string[];
+    publishers?: string[];
+    developers?: string[];
+    achievements?: RAGameRomAchievement[];
+}
+
 export interface Rom {
     id: number;
     name?: string;
@@ -112,6 +137,8 @@ export interface Rom {
     moby_id?: number;
     ss_id?: number;
     ra_id?: number;
+    ra_hash?: string;
+    merged_ra_metadata?: RomRAMetadata;
 }
 
 export interface Firmware {
@@ -342,9 +369,28 @@ class ApiClient {
         let roms;
 
         if (isVirtual) {
-            roms = await this.request<ItemsResponse<Rom>>(`/api/roms?group_by_meta_id=1&virtual_collection_id=${collectionId}&limit=${limit}&offset=${offset}`);
+            roms = await this.request<ItemsResponse<Rom>>(`/api/roms?group_by_meta_id=1&virtual_collection_id=${collectionId}&limit=${limit}&offset=${offset}&with_files=true`);
         } else {
-            roms = await this.request<ItemsResponse<Rom>>(`/api/roms?group_by_meta_id=1&collection_id=${collectionId}&limit=${limit}&offset=${offset}`);
+            roms = await this.request<ItemsResponse<Rom>>(`/api/roms?group_by_meta_id=1&collection_id=${collectionId}&limit=${limit}&offset=${offset}&with_files=true`);
+        }
+
+        if (roms?.items) {
+            roms.items.forEach(rom => {
+                if (!rom.files || rom.files.length === 0) {
+                    if (rom.fs_name) {
+                        rom.files = [{
+                            id: rom.id,
+                            rom_id: rom.id,
+                            file_name: rom.fs_name,
+                            file_extension: (rom as any).fs_extension || '',
+                            file_path: (rom as any).fs_path || '',
+                            file_size_bytes: rom.fs_size_bytes || 0
+                        }];
+                    } else {
+                        rom.files = [];
+                    }
+                }
+            });
         }
 
         if (includeSiblings) {
@@ -353,7 +399,9 @@ class ApiClient {
                 if (rom.siblings) {
                     await Promise.all(rom.siblings.map(async (sibling) => {
                         const siblingFile = await this.request<Rom>(`/api/roms/${sibling.id}`);
-                        rom.files.push(siblingFile.files[0]);
+                        if (siblingFile?.files?.[0]) {
+                            rom.files.push(siblingFile.files[0]);
+                        }
                     }));
                 }
             }));
@@ -364,8 +412,25 @@ class ApiClient {
 
     async getRomsRecentlyAdded(includeSiblings: boolean = true): Promise<Rom[]> {
 
-        const response = await this.request<ItemsResponse<Rom>>('/api/roms?order_by=id&order_dir=desc&limit=15&group_by_meta_id=1');
-        const roms = response.items;
+        const response = await this.request<ItemsResponse<Rom>>('/api/roms?order_by=id&order_dir=desc&limit=15&group_by_meta_id=1&with_files=true');
+        const roms = response.items || [];
+
+        roms.forEach(rom => {
+            if (!rom.files || rom.files.length === 0) {
+                if (rom.fs_name) {
+                    rom.files = [{
+                        id: rom.id,
+                        rom_id: rom.id,
+                        file_name: rom.fs_name,
+                        file_extension: (rom as any).fs_extension || '',
+                        file_path: (rom as any).fs_path || '',
+                        file_size_bytes: rom.fs_size_bytes || 0
+                    }];
+                } else {
+                    rom.files = [];
+                }
+            }
+        });
 
         if (includeSiblings) {
             // Fetch siblings for each ROM
@@ -373,7 +438,9 @@ class ApiClient {
                 if (rom.siblings) {
                     await Promise.all(rom.siblings.map(async (sibling) => {
                         const siblingFile = await this.request<Rom>(`/api/roms/${sibling.id}`);
-                        rom.files.push(siblingFile.files[0]);
+                        if (siblingFile?.files?.[0]) {
+                            rom.files.push(siblingFile.files[0]);
+                        }
                     }));
                 }
             }));
@@ -383,22 +450,28 @@ class ApiClient {
     }
 
     async getRomsByPlatform(platformId: number, limit: number = 20, offset: number = 0, includeSiblings: boolean = true): Promise<ItemsResponse<Rom>> {
-        // Always request using the newer `platform_ids` query parameter.  Older
-        // servers may ignore it, but new servers will definitely honour it; the
-        // previous version check was causing problems when the client hadn't yet
-        // fetched the server version and defaulted to `platform_id`, which on
-        // modern installations is ignored and returned every ROM instead of just
-        // the desired platform.  Using the plural form matches the web UI and
-        // guarantees the filter is applied.
-        // send both query parameters so that older servers (<4.6.0) which only
-        // understand `platform_id` and newer servers which expect `platform_ids` will
-        // both apply the filter.  This avoids relying on the client knowing the
-        // server version (which may not be fetched yet when the initial call happens)
         const platformParam = `platform_ids=${platformId}&platform_id=${platformId}`;
-        const url = `/api/roms?${platformParam}&limit=${limit}&offset=${offset}&group_by_meta_id=1`;
+        const url = `/api/roms?${platformParam}&limit=${limit}&offset=${offset}&group_by_meta_id=1&with_files=true`;
         console.debug('Fetching ROMs by platform, url=', url);
         const res = await this.request<ItemsResponse<Rom>>(url);
-        const roms = res.items;
+        const roms = res.items || [];
+
+        roms.forEach(rom => {
+            if (!rom.files || rom.files.length === 0) {
+                if (rom.fs_name) {
+                    rom.files = [{
+                        id: rom.id,
+                        rom_id: rom.id,
+                        file_name: rom.fs_name,
+                        file_extension: (rom as any).fs_extension || '',
+                        file_path: (rom as any).fs_path || '',
+                        file_size_bytes: rom.fs_size_bytes || 0
+                    }];
+                } else {
+                    rom.files = [];
+                }
+            }
+        });
 
         // Fetch siblings for each ROM
         if (includeSiblings) {
@@ -406,7 +479,9 @@ class ApiClient {
                 if (rom.siblings) {
                     await Promise.all(rom.siblings.map(async (sibling) => {
                         const siblingFile = await this.request<Rom>(`/api/roms/${sibling.id}`);
-                        rom.files.push(siblingFile.files[0]);
+                        if (siblingFile?.files?.[0]) {
+                            rom.files.push(siblingFile.files[0]);
+                        }
                     }));
                 }
             }));
@@ -443,6 +518,9 @@ class ApiClient {
 
     async obtainDownloadLink(romFile: RomFile): Promise<string> {
         await this.waitForCredentialsLoad();
+        if (romFile.id) {
+            return `${this.baseUrl}/api/roms/${romFile.id}/files/content/${encodeURI(romFile.file_name)}`;
+        }
         const url = `${this.baseUrl}/api/roms/${romFile.rom_id}/content/${encodeURI(romFile.file_name)}`;
         return url; // Return the download URL for use with FileSystem
     }
@@ -459,7 +537,25 @@ class ApiClient {
 
     async searchRoms(query: string, options: SearchOptions = {}): Promise<ItemsResponse<Rom>> {
         const response = await this.request<ItemsResponse<Rom>>(
-            `/api/roms?group_by_meta_id=1&search_term=${encodeURIComponent(query)}&order_by=${options.order_by || 'name'}&order_dir=${options.order_dir || 'asc'}&limit=${options.limit || 20}&offset=${options.offset || 0}`);
+            `/api/roms?group_by_meta_id=1&search_term=${encodeURIComponent(query)}&order_by=${options.order_by || 'name'}&order_dir=${options.order_dir || 'asc'}&limit=${options.limit || 20}&offset=${options.offset || 0}&with_files=true`);
+        if (response?.items) {
+            response.items.forEach(rom => {
+                if (!rom.files || rom.files.length === 0) {
+                    if (rom.fs_name) {
+                        rom.files = [{
+                            id: rom.id,
+                            rom_id: rom.id,
+                            file_name: rom.fs_name,
+                            file_extension: (rom as any).fs_extension || '',
+                            file_path: (rom as any).fs_path || '',
+                            file_size_bytes: rom.fs_size_bytes || 0
+                        }];
+                    } else {
+                        rom.files = [];
+                    }
+                }
+            });
+        }
         return response;
     }
 

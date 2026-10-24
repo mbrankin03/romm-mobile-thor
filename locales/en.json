@@ -64,6 +64,8 @@
     "recent": "RECENT",
     "noPlatformsAvailable": "No platforms available",
     "noRomsFoundForPlatform": "No ROMs found for this platform",
+    "noRomsFound": "No games found",
+    "noCollectionsFound": "No collections found",
     "errorLoadingGameDetails": "Error loading game details",
     "unableToLoadData": "Unable to load data. Check your network connection.",
     "unableToLoadPlatformData": "Unable to load data for this platform. Check your network connection.",

@@ -14,11 +14,15 @@ import {
     TouchableOpacity,
     View
 } from 'react-native';
+import { GamepadFocusable } from '@/components/GamepadFocusable';
+import { GamepadHints } from '@/components/GamepadHints';
+import { useGamepadNavigation } from '@/hooks/useGamepadNavigation';
 import { useToast } from '../contexts/ToastContext';
 import { usePlatformFolders } from '../hooks/usePlatformFolders';
 import { useStorageAccessFramework } from '../hooks/useStorageAccessFramework';
 import { useTranslation } from '../hooks/useTranslation';
 import { Release, updateService } from '../services/updateService';
+import { soundService } from '../services/soundService';
 
 
 export default function SettingsScreen() {
@@ -41,10 +45,12 @@ export default function SettingsScreen() {
     const [showConcurrentDownloadsPicker, setShowConcurrentDownloadsPicker] = useState<boolean>(false);
     const [appUpdatesEnabled, setAppUpdatesEnabled] = useState<boolean>(true);
     const [emuJsEnabled, setEmuJsEnabled] = useState<boolean>(true);
+    const [soundEffectsEnabled, setSoundEffectsEnabled] = useState<boolean>(true);
     const [updateAvailable, setUpdateAvailable] = useState<Release | null>(null);
     const [isCheckingForUpdate, setIsCheckingForUpdate] = useState(false);
     const [isDownloading, setIsDownloading] = useState(false);
     const [downloadProgress, setDownloadProgress] = useState(0);
+    useGamepadNavigation();
 
     const handleCheckForUpdates = async () => {
         if (!appUpdatesEnabled) {
@@ -365,6 +371,33 @@ export default function SettingsScreen() {
         }
     };
 
+    const loadSoundEffectsSetting = async () => {
+        try {
+            await soundService.loadSettings();
+            setSoundEffectsEnabled(soundService.isEnabled());
+        } catch (error) {
+            console.error('Error loading sound effects setting:', error);
+            setSoundEffectsEnabled(true);
+        }
+    };
+
+    const saveSoundEffectsSetting = async (value: boolean) => {
+        try {
+            await soundService.setEnabled(value);
+            setSoundEffectsEnabled(value);
+            showSuccessToast(
+                t('settings') + ' ' + t('success').toLowerCase(),
+                'Audio Effects'
+            );
+        } catch (error) {
+            console.error('Error saving sound effects setting:', error);
+            showErrorToast(
+                t('error'),
+                t('settings')
+            );
+        }
+    };
+
     useEffect(() => {
         // Load configured platforms when the component mounts
         loadPlatformFolders();
@@ -389,6 +422,9 @@ export default function SettingsScreen() {
 
         // Load EmuJS enabled setting
         loadEmuJsEnabledSetting();
+
+        // Load console sound effects setting
+        loadSoundEffectsSetting();
 
         // Load app updates enabled setting and check for updates on Android
         const loadAndCheckUpdates = async () => {
@@ -427,12 +463,12 @@ export default function SettingsScreen() {
             <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
                 {/* Header */}
                 <View style={styles.header}>
-                    <TouchableOpacity
+                    <GamepadFocusable
                         style={styles.backButton}
                         onPress={() => router.back()}
                     >
                         <Ionicons name="arrow-back" size={24} color="#fff" />
-                    </TouchableOpacity>
+                    </GamepadFocusable>
                     <Text style={styles.headerTitle}>{t('settings')}</Text>
                 </View>
 
@@ -457,22 +493,22 @@ export default function SettingsScreen() {
                                 </View>
                             </View>
                             <View style={styles.folderActions}>
-                                <TouchableOpacity
+                                <GamepadFocusable
                                     style={[styles.button, styles.changeButton]}
                                     onPress={changeBaseFolder}
                                 >
                                     <Text style={styles.buttonText}>{t('change')}</Text>
-                                </TouchableOpacity>
+                                </GamepadFocusable>
                             </View>
                         </View>
                     ) : (
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={[styles.button, styles.selectButton]}
                             onPress={changeBaseFolder}
                         >
                             <Ionicons name="folder-outline" size={20} color="#fff" />
                             <Text style={styles.buttonText}>{t('selectBaseFolder')}</Text>
-                        </TouchableOpacity>
+                        </GamepadFocusable>
                     )}
                 </View>}
 
@@ -502,32 +538,32 @@ export default function SettingsScreen() {
                                         </View>
                                     </View>
                                     <View style={styles.folderActions}>
-                                        <TouchableOpacity
-                                            style={[styles.button, styles.changeButton]}
-                                            onPress={() => changePlatformFolder(platform.platformSlug, platform.platformName)}
-                                        >
-                                            <Ionicons name="create-outline" size={20} color="#fff" />
-                                            <Text style={styles.buttonText}>{t('change')}</Text>
-                                        </TouchableOpacity>
-                                        <TouchableOpacity
-                                            style={[styles.button, styles.removeButton]}
-                                            onPress={() => removePlatformFolderConfirm(platform.platformSlug, platform.platformName)}
-                                        >
-                                            <Ionicons name="trash-outline" size={20} color="#fff" />
-                                            <Text style={styles.buttonText}>{t('remove')}</Text>
-                                        </TouchableOpacity>
-                                    </View>
-                                </View>
+                                         <GamepadFocusable
+                                             style={[styles.button, styles.changeButton]}
+                                             onPress={() => changePlatformFolder(platform.platformSlug, platform.platformName)}
+                                         >
+                                             <Ionicons name="create-outline" size={20} color="#fff" />
+                                             <Text style={styles.buttonText}>{t('change')}</Text>
+                                         </GamepadFocusable>
+                                         <GamepadFocusable
+                                             style={[styles.button, styles.removeButton]}
+                                             onPress={() => removePlatformFolderConfirm(platform.platformSlug, platform.platformName)}
+                                         >
+                                             <Ionicons name="trash-outline" size={20} color="#fff" />
+                                             <Text style={styles.buttonText}>{t('remove')}</Text>
+                                         </GamepadFocusable>
+                                     </View>
+                                 </View>
                             ))}
 
                             {/* Remove All Button */}
-                            <TouchableOpacity
+                            <GamepadFocusable
                                 style={[styles.button, styles.removeAllButton]}
                                 onPress={removeAllPlatformFoldersConfirm}
                             >
                                 <Ionicons name="trash-bin-outline" size={20} color="#fff" />
                                 <Text style={styles.buttonText}>{t('removeAllPlatformFolders')}</Text>
-                            </TouchableOpacity>
+                            </GamepadFocusable>
 
                         </View>
                     ) : (
@@ -540,6 +576,24 @@ export default function SettingsScreen() {
 
                 </View>}
 
+                {/* Storage & Installed Games Section */}
+                {Platform.OS === 'android' && (
+                    <View style={styles.section}>
+                        <Text style={styles.sectionTitle}>Storage & Installed Games</Text>
+                        <Text style={styles.sectionDescription}>
+                            View on-device ROM storage usage and clean up downloaded games.
+                        </Text>
+
+                        <GamepadFocusable
+                            style={[styles.button, styles.selectButton]}
+                            onPress={() => router.push('/storage')}
+                        >
+                            <Ionicons name="disc-outline" size={20} color="#fff" />
+                            <Text style={styles.buttonText}>Manage Storage</Text>
+                        </GamepadFocusable>
+                    </View>
+                )}
+
                 {/* Firmware Section */}
                 <View style={styles.section}>
                     <Text style={styles.sectionTitle}>{t('firmware') || 'Firmware'}</Text>
@@ -547,13 +601,13 @@ export default function SettingsScreen() {
                         {t('firmwareDescription') || 'Download system firmware files needed for some emulators.'}
                     </Text>
 
-                    <TouchableOpacity
+                    <GamepadFocusable
                         style={[styles.button, styles.selectButton]}
                         onPress={() => router.push('/firmware')}
                     >
                         <Ionicons name="hardware-chip-outline" size={20} color="#fff" />
                         <Text style={styles.buttonText}>{t('manageFirmware') || 'Manage Firmware'}</Text>
-                    </TouchableOpacity>
+                    </GamepadFocusable>
                 </View>
 
                 {/* Download Settings Section */}
@@ -586,13 +640,13 @@ export default function SettingsScreen() {
                                 {t('concurrentDownloadsDescription')}
                             </Text>
                         </View>
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={styles.pickerButton}
                             onPress={() => setShowConcurrentDownloadsPicker(true)}
                         >
                             <Text style={styles.pickerButtonText}>{concurrentDownloads}</Text>
                             <Ionicons name="chevron-down" size={16} color="#ccc" />
-                        </TouchableOpacity>
+                        </GamepadFocusable>
                     </View>
 
                     <View style={styles.settingItem}>
@@ -607,6 +661,22 @@ export default function SettingsScreen() {
                             onValueChange={saveEmuJsEnabledSetting}
                             trackColor={{ false: '#3e3e3e', true: '#4CAF50' }}
                             thumbColor={emuJsEnabled ? '#fff' : '#f4f3f4'}
+                            ios_backgroundColor="#3e3e3e"
+                        />
+                    </View>
+
+                    <View style={styles.settingItem}>
+                        <View style={styles.settingInfo}>
+                            <Text style={styles.settingTitle}>Console Audio Effects</Text>
+                            <Text style={styles.settingDescription}>
+                                Play tactile sounds when navigating, selecting, and going back
+                            </Text>
+                        </View>
+                        <Switch
+                            value={soundEffectsEnabled}
+                            onValueChange={saveSoundEffectsSetting}
+                            trackColor={{ false: '#3e3e3e', true: '#4CAF50' }}
+                            thumbColor={soundEffectsEnabled ? '#fff' : '#f4f3f4'}
                             ios_backgroundColor="#3e3e3e"
                         />
                     </View>
@@ -646,7 +716,7 @@ export default function SettingsScreen() {
                                     </View>
                                 )}
                             </View>
-                            <TouchableOpacity
+                            <GamepadFocusable
                                 style={[
                                     styles.button,
                                     styles.checkButton,
@@ -667,7 +737,7 @@ export default function SettingsScreen() {
                                             : t('checkForUpdates')
                                     }
                                 </Text>
-                            </TouchableOpacity>
+                            </GamepadFocusable>
                         </View>
                         {isDownloading && (
                             <View style={styles.downloadStatus}>
@@ -702,7 +772,7 @@ export default function SettingsScreen() {
                             <Text style={styles.noFoldersText}>{t('loading')}</Text>
                         ) : (
                             supportedLocales.map((localeCode) => (
-                                <TouchableOpacity
+                                <GamepadFocusable
                                     key={localeCode}
                                     style={[
                                         styles.languageButton,
@@ -725,13 +795,15 @@ export default function SettingsScreen() {
                                     {locale === localeCode && (
                                         <Ionicons name="checkmark-circle" size={18} color="#4CAF50" style={styles.checkIcon} />
                                     )}
-                                </TouchableOpacity>
+                                </GamepadFocusable>
                             ))
                         )}
                     </View>
                 </View>
 
             </ScrollView>
+
+            <GamepadHints selectText="Select" backText="Back" />
 
             {/* Concurrent Downloads Picker Modal */}
             <Modal
@@ -744,17 +816,17 @@ export default function SettingsScreen() {
                     <View style={styles.modalContent}>
                         <View style={styles.modalHeader}>
                             <Text style={styles.modalTitle}>{t('concurrentDownloads')}</Text>
-                            <TouchableOpacity
+                            <GamepadFocusable
                                 onPress={() => setShowConcurrentDownloadsPicker(false)}
                                 style={styles.closeButton}
                             >
                                 <Ionicons name="close" size={24} color="#fff" />
-                            </TouchableOpacity>
+                            </GamepadFocusable>
                         </View>
 
                         <View style={styles.pickerOptions}>
                             {[1, 2, 3, 4, 5].map((number) => (
-                                <TouchableOpacity
+                                <GamepadFocusable
                                     key={number}
                                     style={[
                                         styles.pickerOption,
@@ -774,7 +846,7 @@ export default function SettingsScreen() {
                                     {concurrentDownloads === number && (
                                         <Ionicons name="checkmark-circle" size={20} color="#4CAF50" />
                                     )}
-                                </TouchableOpacity>
+                                </GamepadFocusable>
                             ))}
                         </View>
                     </View>

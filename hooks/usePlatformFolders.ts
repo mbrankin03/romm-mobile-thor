@@ -7,7 +7,9 @@ import { useStorageAccessFramework } from './useStorageAccessFramework';
 import * as Application from 'expo-application';
 
 import { Platform } from '@/services/api';
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
+import RNFS from 'react-native-fs';
+import { resolveAndroidPath } from '@/services/storageService';
 import {
     Alert,
     Platform as RNPlatform,
@@ -20,6 +22,95 @@ export interface PlatformFolder {
     folderUri: string;
     folderName: string;
 }
+
+export const COCOON_PLATFORM_ALIASES: Record<string, string[]> = {
+    // Nintendo
+    snes: ['snes', 'sfc', 'super-nintendo', 'super-famicom', 'snesna'],
+    sfc: ['snes', 'sfc', 'super-nintendo', 'super-famicom'],
+    nes: ['nes', 'fc', 'famicom'],
+    fc: ['nes', 'fc', 'famicom'],
+    gba: ['gba', 'gameboyadvance', 'gameboy-advance'],
+    gbc: ['gbc', 'gameboycolor', 'gameboy-color'],
+    gb: ['gb', 'gameboy'],
+    n64: ['n64', 'nintendo64', 'n64dd'],
+    nds: ['nds', 'ds', 'nintendods'],
+    '3ds': ['n3ds', '3ds', 'nintendo3ds'],
+    n3ds: ['n3ds', '3ds', 'nintendo3ds'],
+    ngc: ['gc', 'gamecube', 'ngc'],
+    gc: ['gc', 'gamecube', 'ngc'],
+    gamecube: ['gc', 'gamecube', 'ngc'],
+    wii: ['wii'],
+    wiiu: ['wiiu'],
+    switch: ['switch'],
+    'switch-2': ['switch', 'switch2', 'switch-2'],
+    virtualboy: ['virtualboy', 'vb'],
+    pokemini: ['pokemini'],
+
+    // Sega
+    dc: ['dreamcast', 'dc'],
+    dreamcast: ['dreamcast', 'dc'],
+    genesis: ['genesis', 'megadrive', 'md', 'sega-genesis', 'megadrivejp'],
+    megadrive: ['genesis', 'megadrive', 'md', 'sega-genesis'],
+    gamegear: ['gamegear', 'gg'],
+    mastersystem: ['mastersystem', 'sms', 'mark3'],
+    saturn: ['saturn', 'sega-saturn', 'saturnjp'],
+    sega32: ['sega32x', 'sega32', '32x', 'sega32xna', 'sega32xjp'],
+    sega32x: ['sega32x', 'sega32', '32x'],
+    segacd: ['segacd', 'megacd', 'megacdjp'],
+    segacd32: ['segacd32', 'sega32x', 'segacd', 'megacd'],
+
+    // Sony
+    psx: ['psx', 'ps1', 'playstation', 'ps'],
+    ps1: ['psx', 'ps1', 'playstation', 'ps'],
+    ps2: ['ps2', 'playstation2'],
+    ps3: ['ps3', 'playstation3'],
+    ps4: ['ps4', 'playstation4'],
+    psp: ['psp', 'playstationportable'],
+    psvita: ['psvita', 'vita'],
+    vita: ['psvita', 'vita'],
+
+    // Microsoft
+    xbox: ['xbox'],
+    xbox360: ['xbox360', 'x360'],
+
+    // PC / Computers
+    win: ['windows', 'pc', 'dos', 'windows9x', 'windows3x'],
+    pc: ['windows', 'pc', 'dos'],
+    dos: ['dos', 'pc'],
+    amiga: ['amiga', 'amiga1200', 'amiga600', 'amigacd32'],
+    c64: ['c64'],
+    atarist: ['atarist'],
+    zxspectrum: ['zxspectrum'],
+
+    // Arcade & Other
+    arcade: ['arcade', 'mame', 'fba', 'fbneo'],
+    mame: ['mame', 'arcade'],
+    fba: ['fba', 'fbneo', 'arcade'],
+    neogeo: ['neogeo', 'neo-geo', 'neogeocd'],
+    '3do': ['3do'],
+    atari2600: ['atari2600', 'a2600'],
+    atari5200: ['atari5200', 'a5200'],
+    atari7800: ['atari7800', 'a7800'],
+    atarilynx: ['atarilynx', 'lynx'],
+    atarijaguar: ['atarijaguar', 'jaguar'],
+    tg16: ['tg16', 'pcengine', 'tg-cd', 'pcenginecd', 'pcfx'],
+    pcengine: ['pcengine', 'tg16', 'pcenginecd', 'pcfx'],
+    wonderswan: ['wonderswan', 'wonderswancolor'],
+    wonderswancolor: ['wonderswancolor', 'wonderswan'],
+};
+
+export const getPlatformAliases = (platformSlug: string, fsSlug?: string): string[] => {
+    const slug = (platformSlug || '').toLowerCase();
+    const fs = (fsSlug || '').toLowerCase();
+    const aliases = new Set<string>();
+    if (slug) aliases.add(slug);
+    if (fs) aliases.add(fs);
+    (COCOON_PLATFORM_ALIASES[slug] || []).forEach(a => aliases.add(a.toLowerCase()));
+    if (fs) {
+        (COCOON_PLATFORM_ALIASES[fs] || []).forEach(a => aliases.add(a.toLowerCase()));
+    }
+    return Array.from(aliases).filter(Boolean);
+};
 
 export const usePlatformFolders = () => {
     const { checkDirectoryPermissions, requestDirectoryPermissions } = useStorageAccessFramework();
@@ -242,59 +333,149 @@ export const usePlatformFolders = () => {
         }
     }, []);
 
-    const searchPlatformFolder = useCallback(
-        async (platform: Platform): Promise<PlatformFolder | null> => {
+    // Returns all matching folders for a platform (checking baseFolder against all known aliases)
+    const getAllPlatformFolders = useCallback(
+        async (platform: Platform): Promise<PlatformFolder[]> => {
             try {
-                const folder = await getPlatformFolder(platform.slug);
-                if (folder) {
-                    return folder;
-                } else {
-                    // Try searching folder from base folder
-                    const baseFolder = await AsyncStorage.getItem(STORAGE_KEY_BASE);
+                const baseFolder = await AsyncStorage.getItem(STORAGE_KEY_BASE);
+                const aliases = getPlatformAliases(platform.slug, platform.fs_slug);
 
-                    if (!baseFolder) {
-                        console.warn('No base folder configured for platform folders');
-                        return null;
-                    }
+                if (!baseFolder) {
+                    const single = await getPlatformFolder(platform.slug);
+                    return single ? [single] : [];
+                }
 
-                    if (RNPlatform.OS === 'android') {
-                        // Use SAF for Android
-                        const files = await SAF.listFiles(baseFolder);
+                const resultFolders: PlatformFolder[] = [];
 
-                        for (const file of files) {
-                            if (file.name === platform.slug) {
-                                return await savePlatformFolder(platform.fs_slug, platform.name, file.uri);
-                            }
-                        }
-                    } else {
-                        // Use expo-file-system for iOS
+                if (RNPlatform.OS === 'android') {
+                    const resolved = baseFolder.startsWith('content://') ? resolveAndroidPath(baseFolder) : baseFolder;
+                    if (resolved && (await RNFS.exists(resolved))) {
                         try {
-                            const files = await FileSystem.readDirectoryAsync(baseFolder);
-                            console.log('Files in base folder:', files);
-
-                            for (const fileName of files) {
-                                if (fileName === platform.slug) {
-                                    const platformFolderUri = `${baseFolder}${fileName}`;
-                                    const fileInfo = await FileSystem.getInfoAsync(platformFolderUri);
-
-                                    if (fileInfo.exists && fileInfo.isDirectory) {
-                                        return await savePlatformFolder(platform.fs_slug, platform.name, platformFolderUri);
+                            const entries = await RNFS.readDir(resolved);
+                            for (const entry of entries) {
+                                if (entry.isDirectory()) {
+                                    const fileName = entry.name.toLowerCase();
+                                    if (aliases.includes(fileName)) {
+                                        resultFolders.push({
+                                            platformSlug: platform.slug,
+                                            platformName: platform.name,
+                                            folderUri: entry.path,
+                                            folderName: entry.name
+                                        });
                                     }
                                 }
                             }
-                        } catch (error) {
-                            console.error('Error reading iOS directory:', error);
+                        } catch (err) {
+                            console.warn('Error reading resolved baseFolder directory:', err);
                         }
+                    } else if (baseFolder.startsWith('content://')) {
+                        const files = await SAF.listFiles(baseFolder);
+                        for (const file of files) {
+                            const fileName = file.name.toLowerCase();
+                            if (aliases.includes(fileName)) {
+                                resultFolders.push({
+                                    platformSlug: platform.slug,
+                                    platformName: platform.name,
+                                    folderUri: file.uri,
+                                    folderName: file.name
+                                });
+                            }
+                        }
+                    }
+                } else {
+                    try {
+                        const dirNames = await FileSystem.readDirectoryAsync(baseFolder);
+                        for (const name of dirNames) {
+                            if (aliases.includes(name.toLowerCase())) {
+                                const uri = `${baseFolder}${name}`;
+                                resultFolders.push({
+                                    platformSlug: platform.slug,
+                                    platformName: platform.name,
+                                    folderUri: uri,
+                                    folderName: name
+                                });
+                            }
+                        }
+                    } catch (e) {
+                        console.error('Error reading iOS base folder directory:', e);
                     }
                 }
 
-                return null;
+                // Fallback to cached platform folder if none matched in base folder
+                if (resultFolders.length === 0) {
+                    const single = await getPlatformFolder(platform.slug);
+                    if (single) resultFolders.push(single);
+                }
+
+                return resultFolders;
             } catch (error) {
-                console.error(`Error searching for platform folder ${platform.slug}:`, error);
-                throw error;
+                console.error(`Error getting all platform folders for ${platform.slug}:`, error);
+                return [];
             }
         },
         [getPlatformFolder]
+    );
+
+    const searchPlatformFolder = useCallback(
+        async (platform: Platform): Promise<PlatformFolder | null> => {
+            try {
+                const allFolders = await getAllPlatformFolders(platform);
+
+                if (allFolders.length === 1) {
+                    await savePlatformFolder(platform.slug, platform.name, allFolders[0].folderUri);
+                    if (platform.fs_slug && platform.fs_slug !== platform.slug) {
+                        await savePlatformFolder(platform.fs_slug, platform.name, allFolders[0].folderUri);
+                    }
+                    return allFolders[0];
+                }
+
+                if (allFolders.length > 1) {
+                    // Pick the folder that actually contains game files!
+                    let bestFolder = allFolders[0];
+                    let maxFileCount = -1;
+
+                    for (const folder of allFolders) {
+                        try {
+                            let count = 0;
+                            if (RNPlatform.OS === 'android') {
+                                const list = await SAF.listFiles(folder.folderUri);
+                                count = list.filter(f => {
+                                    const fName = f.name.toLowerCase();
+                                    if (fName === 'systeminfo.txt' || fName === '.nomedia') return false;
+                                    return (f as any).size === undefined || (f as any).size > 0;
+                                }).length;
+                            } else {
+                                const list = await FileSystem.readDirectoryAsync(folder.folderUri);
+                                count = list.length;
+                            }
+                            if (count > maxFileCount) {
+                                maxFileCount = count;
+                                bestFolder = folder;
+                            }
+                        } catch (e) {
+                            // ignore read errors
+                        }
+                    }
+
+                    await savePlatformFolder(platform.slug, platform.name, bestFolder.folderUri);
+                    if (platform.fs_slug && platform.fs_slug !== platform.slug) {
+                        await savePlatformFolder(platform.fs_slug, platform.name, bestFolder.folderUri);
+                    }
+                    return bestFolder;
+                }
+
+                // If not found in base folder, auto-create it!
+                const created = await createPlatformFolder(platform.slug);
+                if (created && platform.fs_slug && platform.fs_slug !== platform.slug) {
+                    await savePlatformFolder(platform.fs_slug, platform.name, created.folderUri);
+                }
+                return created;
+            } catch (error) {
+                console.error(`Error searching for platform folder ${platform.slug}:`, error);
+                return null;
+            }
+        },
+        [getAllPlatformFolders, savePlatformFolder, createPlatformFolder]
     );
 
 
@@ -448,6 +629,7 @@ export const usePlatformFolders = () => {
         requestPlatformFolder,
         createPlatformFolder,
         searchPlatformFolder,
+        getAllPlatformFolders,
         savePlatformFolder,
         removePlatformFolder,
         hasPlatformFolder,

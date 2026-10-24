@@ -43,39 +43,27 @@ export const useDynamicColumns = () => {
         const { width, height } = screenData;
         const isLandscape = orientation === ScreenOrientation.Orientation.LANDSCAPE_LEFT ||
             orientation === ScreenOrientation.Orientation.LANDSCAPE_RIGHT;
+        // Landscape on handhelds like Ayn Thor: width is ~833dp (1920px physical @ 369dpi)
+        const isHandheldLandscape = isLandscape || width > height;
 
-        // Base card width (minimum size for readability)
-        const baseCardWidth = 120;
-        // Padding and margins
-        const horizontalPadding = 40; // 20px on each side
-        const cardMargin = 10; // margin between cards
-
-        // Calculate available width
-        const availableWidth = width - horizontalPadding;
-
-        // Calculate maximum possible columns based on card width
-        const maxPossibleColumns = Math.floor(availableWidth / (baseCardWidth + cardMargin));
-
-        // Set column limits based on device type and orientation
-        let minColumns = 2;
-        let maxColumns = 6;
-
-        // Adjust based on screen size (tablet vs phone)
-        if (width >= 768) { // Tablet
-            minColumns = isLandscape ? 4 : 3;
-            maxColumns = isLandscape ? 8 : 6;
-        } else { // Phone
-            minColumns = isLandscape ? 3 : 2;
-            maxColumns = isLandscape ? 6 : 4;
+        if (isHandheldLandscape) {
+            // Handheld landscape: 5 clean columns for game cards
+            const columns = width >= 800 ? 5 : 4;
+            const horizontalPadding = 32; // 16px each side
+            const cardMargin = 12;
+            const availableWidth = width - horizontalPadding;
+            const cardWidth = Math.floor((availableWidth - (cardMargin * (columns - 1))) / columns);
+            return { columns, cardWidth, isLandscape: true };
         }
 
-        // Final column count within limits
-        const columns = Math.max(minColumns, Math.min(maxColumns, maxPossibleColumns));
+        // Portrait fallback
+        const columns = 2;
+        const horizontalPadding = 24;
+        const cardMargin = 12;
+        const availableWidth = width - horizontalPadding;
+        const cardWidth = Math.floor((availableWidth - (cardMargin * (columns - 1))) / columns);
 
-        // Calculate actual card width based on final column count
-        const actualCardWidth = Math.floor((availableWidth - (cardMargin * (columns - 1))) / columns);
-
-        return { columns, cardWidth: actualCardWidth, isLandscape };
+        return { columns, cardWidth, isLandscape: false };
     };
 
     return calculateColumns();

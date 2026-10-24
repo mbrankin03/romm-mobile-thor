@@ -1,6 +1,7 @@
 import { Ionicons } from '@expo/vector-icons';
 import { router } from 'expo-router';
-import React from 'react';
+import React, { useEffect, useState } from 'react';
+import RNFS from 'react-native-fs';
 import {
     FlatList,
     Image,
@@ -10,6 +11,9 @@ import {
     TouchableOpacity,
     View
 } from 'react-native';
+import { GamepadFocusable } from '../../components/GamepadFocusable';
+import { GamepadHints } from '../../components/GamepadHints';
+import { useGamepadNavigation } from '../../hooks/useGamepadNavigation';
 import { DownloadItem, DownloadStatus, useDownload } from '../../contexts/DownloadContext';
 import { useTranslation } from '../../hooks/useTranslation';
 
@@ -22,12 +26,58 @@ export default function DownloadsScreen() {
         failedDownloads,
         removeFromQueue,
         retryDownload,
+        retryAllFailed,
         clearCompleted,
         clearFailed,
         pauseDownload,
         resumeDownload,
         cancelDownload,
     } = useDownload();
+    const [storageInfo, setStorageInfo] = useState<{ total: number; free: number } | null>(null);
+
+    useEffect(() => {
+        const fetchStorage = async () => {
+            try {
+                const info = await RNFS.getFSInfo();
+                if (info && info.totalSpace > 0) {
+                    setStorageInfo({
+                        total: info.totalSpace,
+                        free: info.freeSpace,
+                    });
+                }
+            } catch (err) {
+                console.warn('Failed to fetch FS info:', err);
+            }
+        };
+        fetchStorage();
+    }, [completedDownloads?.length]);
+
+    useGamepadNavigation({
+        onBack: () => {
+            router.replace('/');
+            return true;
+        },
+        onButtonB: () => {
+            router.replace('/');
+            return true;
+        },
+        onButtonX: () => {
+            if (completedDownloads.length > 0) {
+                clearCompleted();
+                return true;
+            }
+            return false;
+        },
+        onButtonY: () => {
+            if (activeDownloads.length > 0) {
+                activeDownloads.forEach(d => pauseDownload(d.id));
+            } else {
+                const paused = downloads.filter(d => d.status === DownloadStatus.PAUSED);
+                paused.forEach(d => resumeDownload(d.id));
+            }
+            return true;
+        },
+    });
 
     const formatBytes = (bytes: number): string => {
         if (bytes === 0) return '0 B';
@@ -132,47 +182,52 @@ export default function DownloadsScreen() {
                 </View>
                 <View style={styles.downloadActions}>
                     {item.status === DownloadStatus.DOWNLOADING && (
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={styles.actionButton}
+                            glowColor="#007AFF"
                             onPress={() => pauseDownload(item.id)}
                         >
                             <Ionicons name="pause" size={20} color="#007AFF" />
-                        </TouchableOpacity>
+                        </GamepadFocusable>
                     )}
                     {item.status === DownloadStatus.PAUSED && (
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={styles.actionButton}
+                            glowColor="#34C759"
                             onPress={() => resumeDownload(item.id)}
                         >
                             <Ionicons name="play" size={20} color="#34C759" />
-                        </TouchableOpacity>
+                        </GamepadFocusable>
                     )}
                     {(item.status === DownloadStatus.FAILED || item.status === DownloadStatus.CANCELLED) && (
-                        <TouchableOpacity
+                        <GamepadFocusable
                             style={styles.actionButton}
+                            glowColor="#FF9500"
                             onPress={() => retryDownload(item.id)}
                         >
                             <Ionicons name="refresh" size={20} color="#FF9500" />
-                        </TouchableOpacity>
+                        </GamepadFocusable>
                     )}
                     {(item.status === DownloadStatus.PENDING ||
                         item.status === DownloadStatus.DOWNLOADING ||
                         item.status === DownloadStatus.PAUSED ||
                         item.status === DownloadStatus.EXTRACTING ||
                         item.status === DownloadStatus.MOVING) && (
-                            <TouchableOpacity
+                            <GamepadFocusable
                                 style={styles.actionButton}
+                                glowColor="#FF3B30"
                                 onPress={() => cancelDownload(item.id)}
                             >
                                 <Ionicons name="close" size={20} color="#FF3B30" />
-                            </TouchableOpacity>
+                            </GamepadFocusable>
                         )}
-                    <TouchableOpacity
+                    <GamepadFocusable
                         style={styles.actionButton}
+                        glowColor="#EF4444"
                         onPress={() => removeFromQueue(item.id)}
                     >
                         <Ionicons name="trash" size={20} color="#8E8E93" />
-                    </TouchableOpacity>
+                    </GamepadFocusable>
                 </View>
             </View>
 
@@ -235,7 +290,7 @@ export default function DownloadsScreen() {
             <View style={styles.header}>
                 <TouchableOpacity
                     style={styles.backButton}
-                    onPress={() => router.back()}
+                    onPress={() => router.replace('/')}
                 >
                     <Ionicons name="arrow-back" size={24} color="#fff" />
                 </TouchableOpacity>
@@ -243,7 +298,7 @@ export default function DownloadsScreen() {
                 <View style={styles.headerSpacer} />
             </View>
 
-            {/* Summary */}
+            {/* Summary & Storage Space Bar */}
             <View style={styles.summary}>
                 <View style={styles.summaryItem}>
                     <Text style={styles.summaryNumber}>{activeDownloads.length}</Text>
@@ -259,7 +314,39 @@ export default function DownloadsScreen() {
                 </View>
             </View>
 
-            {/* Clear buttons */}
+            {/* Storage Space Indicator with link to Storage Manager */}
+            {storageInfo && (
+                <TouchableOpacity
+                    activeOpacity={0.8}
+                    style={styles.storageBarContainer}
+                    onPress={() => router.push('/storage')}
+                >
+                    <View style={styles.storageBarHeader}>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Ionicons name="hardware-chip-outline" size={14} color="#00E5FF" />
+                            <Text style={styles.storageLabel}>Device Storage</Text>
+                        </View>
+                        <View style={{ flexDirection: 'row', alignItems: 'center', gap: 6 }}>
+                            <Text style={styles.storageValue}>
+                                {`${formatBytes(storageInfo.free)} free of ${formatBytes(storageInfo.total)}`}
+                            </Text>
+                            <Ionicons name="chevron-forward" size={14} color="#00E5FF" />
+                        </View>
+                    </View>
+                    <View style={styles.storageBarTrack}>
+                        <View
+                            style={[
+                                styles.storageBarFill,
+                                {
+                                    width: `${Math.min(100, Math.max(2, Math.round(((storageInfo.total - storageInfo.free) / storageInfo.total) * 100)))}%`
+                                }
+                            ]}
+                        />
+                    </View>
+                </TouchableOpacity>
+            )}
+
+            {/* Action buttons */}
             {(completedDownloads.length > 0 || failedDownloads.length > 0) && (
                 <View style={styles.clearButtons}>
                     {completedDownloads.length > 0 && (
@@ -271,12 +358,21 @@ export default function DownloadsScreen() {
                         </TouchableOpacity>
                     )}
                     {failedDownloads.length > 0 && (
-                        <TouchableOpacity
-                            style={[styles.clearButton, styles.clearFailedButton]}
-                            onPress={clearFailed}
-                        >
-                            <Text style={styles.clearButtonText}>{t('clearFailed')}</Text>
-                        </TouchableOpacity>
+                        <>
+                            <TouchableOpacity
+                                style={[styles.clearButton, { backgroundColor: 'rgba(245, 158, 11, 0.2)', borderColor: '#F59E0B' }]}
+                                onPress={retryAllFailed}
+                            >
+                                <Ionicons name="refresh" size={14} color="#F59E0B" style={{ marginRight: 4 }} />
+                                <Text style={[styles.clearButtonText, { color: '#F59E0B' }]}>Retry All Failed</Text>
+                            </TouchableOpacity>
+                            <TouchableOpacity
+                                style={[styles.clearButton, styles.clearFailedButton]}
+                                onPress={clearFailed}
+                            >
+                                <Text style={styles.clearButtonText}>{t('clearFailed')}</Text>
+                            </TouchableOpacity>
+                        </>
                     )}
                 </View>
             )}
@@ -321,6 +417,11 @@ export default function DownloadsScreen() {
                     subtitle={t('noDownloadsDescription')}
                 />
             )}
+            <GamepadHints hints={[
+                { button: 'B', label: 'Library' },
+                { button: 'X', label: 'Clear Done' },
+                { button: 'Y', label: 'Pause/Resume' },
+            ]} />
         </SafeAreaView>
     );
 }
@@ -371,6 +472,42 @@ const styles = StyleSheet.create({
         color: '#8E8E93',
         fontSize: 12,
         marginTop: 4,
+    },
+    storageBarContainer: {
+        backgroundColor: '#11131a',
+        paddingHorizontal: 16,
+        paddingVertical: 12,
+        marginHorizontal: 16,
+        marginBottom: 12,
+        borderRadius: 12,
+        borderWidth: 1,
+        borderColor: '#1e2438',
+    },
+    storageBarHeader: {
+        flexDirection: 'row',
+        justifyContent: 'space-between',
+        alignItems: 'center',
+        marginBottom: 8,
+    },
+    storageLabel: {
+        color: '#fff',
+        fontSize: 12,
+        fontWeight: '600',
+    },
+    storageValue: {
+        color: '#9ca3af',
+        fontSize: 11,
+    },
+    storageBarTrack: {
+        height: 6,
+        backgroundColor: '#262938',
+        borderRadius: 3,
+        overflow: 'hidden',
+    },
+    storageBarFill: {
+        height: '100%',
+        backgroundColor: '#00E5FF',
+        borderRadius: 3,
     },
     clearButtons: {
         flexDirection: 'row',

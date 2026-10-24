@@ -1,5 +1,5 @@
 import { openDocumentTree } from "@joplin/react-native-saf-x";
-import * as FileSystem from 'expo-file-system';
+import * as FileSystem from 'expo-file-system/legacy';
 import { Platform } from 'react-native';
 import { useTranslation } from './useTranslation';
 

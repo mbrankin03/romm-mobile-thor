@@ -3,11 +3,44 @@ import { openDocumentTree, mkdir, createFile, moveFile, unlink, stat, listFiles,
 import { unzip, subscribe } from 'react-native-zip-archive';
 import React, { createContext, ReactNode, useContext, useEffect, useState } from 'react';
 import ReactNativeBlobUtil from 'react-native-blob-util';
+import RNFS from 'react-native-fs';
 import { PlatformFolder } from '../hooks/usePlatformFolders';
 import { useRomFileSystem } from '../hooks/useRomFileSystem';
 import { apiClient, Rom, RomFile } from '../services/api';
+import { notificationService } from '../services/notificationService';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Platform } from 'react-native';
+import { activateKeepAwakeAsync, deactivateKeepAwake } from 'expo-keep-awake';
+import { soundService } from '../services/soundService';
+import { hapticService } from '../services/hapticService';
+
+const formatBytes = (bytes: number): string => {
+    if (!bytes || bytes <= 0) return '0 B';
+    const k = 1024;
+    const sizes = ['B', 'KB', 'MB', 'GB'];
+    const i = Math.floor(Math.log(bytes) / Math.log(k));
+    return parseFloat((bytes / Math.pow(k, i)).toFixed(1)) + ' ' + (sizes[i] || 'B');
+};
+
+// Convert SAF URI (e.g. content://.../tree/primary:ROMs/gba or content://.../tree/primary%3AROMs/gba) to direct filesystem path if on primary storage
+const resolveAndroidPath = (uri: string): string | null => {
+    try {
+        let decoded = decodeURIComponent(uri);
+        // Sometimes it may be doubly encoded
+        if (decoded.includes('%3A') || decoded.includes('%2F')) {
+            decoded = decodeURIComponent(decoded);
+        }
+        const match = decoded.match(/tree\/(?:primary:|[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}:)(.*?)$/);
+        if (match) {
+            const rel = match[1].replace(/^\/+/, '');
+            return `/sdcard/${rel}`;
+        }
+        if (decoded.startsWith('/sdcard/') || decoded.startsWith('/storage/emulated/0/')) {
+            return decoded;
+        }
+    } catch {}
+    return null;
+};
 
 // Define the types here to avoid import issues
 export enum DownloadStatus {
@@ -37,6 +70,7 @@ export interface DownloadItem {
     startTime?: Date;
     endTime?: Date;
     downloadResumable?: FileSystem.DownloadResumable;
+    retryCount?: number;
 }
 
 interface DownloadContextType {
@@ -44,11 +78,12 @@ interface DownloadContextType {
     activeDownloads: DownloadItem[];
     completedDownloads: DownloadItem[];
     failedDownloads: DownloadItem[];
-    isRomDownloading: (romFile: RomFile) => boolean;
+    isRomDownloading: (romFile?: RomFile) => boolean;
     getDownloadById: (id: string) => DownloadItem | undefined;
     addRomToQueue: (rom: Rom, romFile: RomFile, platformFolder: PlatformFolder) => string;
     removeFromQueue: (downloadId: string) => void;
     retryDownload: (downloadId: string) => void;
+    retryAllFailed: () => void;
     clearCompleted: () => void;
     clearFailed: () => void;
     pauseDownload: (downloadId: string) => void;
@@ -76,6 +111,10 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
     const [activeDownloads, setActiveDownloads] = useState<Set<string>>(new Set());
     const { refreshRomCheck } = useRomFileSystem();
 
+    useEffect(() => {
+        notificationService.initialize().catch(() => {});
+    }, []);
+
     const getConcurrentDownloadsLimit = async (): Promise<number> => {
         try {
             const value = await AsyncStorage.getItem('concurrentDownloads');
@@ -99,6 +138,26 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                 const download = downloads.find(d => d.id === downloadId);
 
                 if (download && download.status === DownloadStatus.PENDING) {
+                    try {
+                        const battery = await notificationService.getBatteryStatus();
+                        if (battery && battery.level > 0 && battery.level <= 15 && !battery.isCharging) {
+                            console.warn(`Battery level is low (${battery.level}%). Pausing download ${download.romName}`);
+                            notificationService.showProgress(
+                                notificationService.getNotificationId(downloadId),
+                                `Paused: ${download.romName}`,
+                                `Low battery (${battery.level}%). Connect charger to resume.`,
+                                0,
+                                100,
+                                false
+                            );
+                            updateDownload(downloadId, {
+                                status: DownloadStatus.PAUSED,
+                                error: `Paused: Low battery (${battery.level}%). Connect charger to resume.`,
+                            });
+                            return;
+                        }
+                    } catch {}
+
                     setDownloadQueue(prev => prev.slice(1));
                     setActiveDownloads(prev => new Set([...prev, downloadId]));
                     await startDownload(downloadId);
@@ -123,11 +182,23 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
         const download = downloads.find(d => d.id === downloadId);
         if (!download) return;
 
+        const notifId = notificationService.getNotificationId(downloadId);
+
         try {
             updateDownload(downloadId, {
                 status: DownloadStatus.DOWNLOADING,
                 startTime: new Date(),
             });
+
+            // Show starting notification
+            notificationService.showProgress(
+                notifId,
+                download.romName,
+                `${download.romFile.file_name} • Starting download...`,
+                0,
+                100,
+                true
+            );
 
             // Get the download URL from the API
             const downloadUrl = await apiClient.obtainDownloadLink(download.romFile);
@@ -139,8 +210,10 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
             let speedHistory: number[] = [];
             let currentSpeed = 0; // Keep track of current speed
             let currentRemainingTime = 0; // Keep track of current remaining time
+            let lastNotifTime = Date.now();
+            let lastNotifProgress = -1;
             const maxSpeedHistoryLength = 5; // Keep last 5 speed measurements for smoothing
-            const minTimeForSpeedCalculation = 3.0; // Minimum time in seconds for speed calculation
+            const minTimeForSpeedCalculation = 1.5; // Minimum time in seconds for speed calculation
 
             // Create download resumable
             const downloadResumable = FileSystem.createDownloadResumable(
@@ -150,12 +223,13 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                     headers: apiClient.getAuthHeaders(),
                 },
                 (downloadProgress) => {
-                    
-
-                    // Calculate speed only when enough time has passed
                     const currentTime = Date.now();
                     const timeElapsed = (currentTime - lastProgressTime) / 1000; // seconds
                     const bytesDownloaded = downloadProgress.totalBytesWritten - lastDownloadedBytes;
+
+                    const progress = Math.round(
+                        (downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite) * 100
+                    );
 
                     if (timeElapsed >= minTimeForSpeedCalculation && bytesDownloaded > 0) {
                         const instantSpeed = bytesDownloaded / timeElapsed; // bytes per second
@@ -176,10 +250,6 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                         lastProgressTime = currentTime;
                         lastDownloadedBytes = downloadProgress.totalBytesWritten;
 
-                        const progress = Math.round(
-                            (downloadProgress.totalBytesWritten / downloadProgress.totalBytesExpectedToWrite) * 100
-                        );
-
                         updateDownload(downloadId, {
                             progress,
                             downloadedBytes: downloadProgress.totalBytesWritten,
@@ -189,7 +259,25 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                         });
                     }
 
-
+                    // Update notification periodically (throttle to at most once per 800ms or on significant progress changes)
+                    if (
+                        currentTime - lastNotifTime >= 800 ||
+                        (progress >= lastNotifProgress + 3 && currentTime - lastNotifTime >= 400)
+                    ) {
+                        lastNotifTime = currentTime;
+                        lastNotifProgress = progress;
+                        const writtenStr = formatBytes(downloadProgress.totalBytesWritten);
+                        const totalStr = formatBytes(downloadProgress.totalBytesExpectedToWrite);
+                        const speedStr = currentSpeed > 0 ? ` • ${formatBytes(currentSpeed)}/s` : '';
+                        notificationService.showProgress(
+                            notifId,
+                            download.romName,
+                            `${progress}% • ${writtenStr} / ${totalStr}${speedStr}`,
+                            progress,
+                            100,
+                            false
+                        );
+                    }
                 }
             );
 
@@ -208,9 +296,38 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
             }
         } catch (error) {
             console.error('Download error:', error);
+            const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+
+            const currentRetries = download.retryCount || 0;
+            if (currentRetries < 3) {
+                console.log(`Auto-retrying download for ${download.romName} (attempt ${currentRetries + 1}/3)...`);
+                notificationService.showProgress(
+                    notifId,
+                    `Reconnecting: ${download.romName}`,
+                    `Network interrupted. Retrying (${currentRetries + 1}/3)...`,
+                    download.progress || 0,
+                    100,
+                    true
+                );
+                updateDownload(downloadId, {
+                    status: DownloadStatus.PENDING,
+                    retryCount: currentRetries + 1,
+                    error: `Reconnecting (attempt ${currentRetries + 1}/3)...`,
+                });
+                setTimeout(() => {
+                    setDownloadQueue(prev => [downloadId, ...prev.filter(id => id !== downloadId)]);
+                }, 3500);
+                return;
+            }
+
+            notificationService.showFailed(
+                notifId,
+                'Download Failed',
+                `${download.romName}: ${errorMessage}`
+            );
             updateDownload(downloadId, {
                 status: DownloadStatus.FAILED,
-                error: error instanceof Error ? error.message : 'Unknown error',
+                error: errorMessage,
                 endTime: new Date(),
             });
         } finally {
@@ -222,144 +339,189 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
         }
     };
 
+    // Keep screen awake during active downloads to prevent Android deep sleep socket drops
+    useEffect(() => {
+        if (activeDownloads.size > 0) {
+            activateKeepAwakeAsync('romm-downloads').catch(() => {});
+        } else {
+            deactivateKeepAwake('romm-downloads');
+        }
+    }, [activeDownloads.size]);
+
     const completeDownload = async (downloadId: string, tempFilePath: string, download: DownloadItem): Promise<void> => {
+        const notifId = notificationService.getNotificationId(downloadId);
         try {
-
-
-            const updateDownloadProgress = async (filePath: string, expectedFileSize: number) => {
-
-                const fileExists = await ReactNativeBlobUtil.fs.exists(filePath);
-
-                if(!fileExists) {
-                    setTimeout(() => { updateDownloadProgress(filePath, expectedFileSize) }, 100);
-                    return;
-                }
-
-                const fileStatus = await ReactNativeBlobUtil.fs.stat(filePath);
-
-                const newProgress = Math.round((fileStatus.size / expectedFileSize) * 100);
-                updateDownload(downloadId, {
-                    status: DownloadStatus.MOVING,
-                    progress: newProgress,
-                    downloadedBytes: fileStatus.size,
-                    totalBytes: expectedFileSize,
-                    endTime: new Date(),
-                });
-
-                if(newProgress < 100) {
-                    setTimeout(() => { updateDownloadProgress(filePath, expectedFileSize) }, 1000); 
-                } else {
-                    updateDownload(downloadId, {
-                        status: DownloadStatus.COMPLETED,
-                        progress: 100,
-                        endTime: new Date(),
-                    })
-                }
-            };
-
-            const isZip = download.romFile.file_name.endsWith('.zip');
+            const isZip = download.romFile.file_name.toLowerCase().endsWith('.zip');
             const value = await AsyncStorage.getItem('unzipFilesOnDownload');
-            const shouldUnzipFiles = value !== null ? JSON.parse(value) : true; // Default to true if not set
-            //const shouldUnzipFiles = true; // For now, always unzip files
+            const shouldUnzipFiles = value !== null ? JSON.parse(value) : true;
+
+            let normalizedTargetFolderUri = download.platformFolder.folderUri;
+            // Ensure encoded format matches Android's persisted SAF URI (tree/primary%3AROMs)
+            if (normalizedTargetFolderUri.includes('/tree/primary:')) {
+                normalizedTargetFolderUri = normalizedTargetFolderUri.replace('/tree/primary:', '/tree/primary%3A');
+            }
+            const targetFolderUri = normalizedTargetFolderUri.endsWith('/')
+                ? normalizedTargetFolderUri
+                : `${normalizedTargetFolderUri}/`;
 
             if (isZip && shouldUnzipFiles) {
-                console.log(`Unzipping file: ${tempFilePath}`);
-                const unzipPath = FileSystem.documentDirectory + `${download.romFile.file_name.replace('.zip', '')}` || '';
-
                 updateDownload(downloadId, {
                     status: DownloadStatus.EXTRACTING,
                     progress: 0,
                 });
+                notificationService.showProgress(
+                    notifId,
+                    `Extracting ${download.romName}`,
+                    `Extracting ${download.romFile.file_name}...`,
+                    0,
+                    100,
+                    true
+                );
 
-                const zipProgressSubscription = subscribe(({ progress, filePath }) => {
+                const unzipBaseName = download.romFile.file_name.replace(/\.zip$/i, '');
+                const unzipPath = `${FileSystem.documentDirectory}${unzipBaseName}`;
+
+                const zipProgressSubscription = subscribe(({ progress }) => {
+                    const prog = Math.min(100, Math.round(progress * 100));
                     updateDownload(downloadId, {
                         status: DownloadStatus.EXTRACTING,
-                        progress: Math.round(progress * 100),
-                        endTime: new Date(),
+                        progress: prog,
                     });
-                })
+                    notificationService.showProgress(
+                        notifId,
+                        `Extracting ${download.romName}`,
+                        `Extracting archive: ${prog}%`,
+                        prog,
+                        100,
+                        false
+                    );
+                });
 
-                // Here we use different methods based on platform
-                if (Platform.OS === 'android') {
-                    const unzipedFile = await unzip(tempFilePath, unzipPath);
-                    console.log(`Unzipped to: ${unzipedFile}`);
-
+                try {
+                    await unzip(tempFilePath, unzipPath);
+                } finally {
                     zipProgressSubscription.remove();
+                }
 
-                    updateDownload(downloadId, {
-                        status: DownloadStatus.MOVING,
-                        progress: 0,
-                        endTime: new Date(),
-                    });
+                updateDownload(downloadId, {
+                    status: DownloadStatus.MOVING,
+                    progress: 75,
+                });
+                notificationService.showProgress(
+                    notifId,
+                    `Saving ${download.romName}`,
+                    `Moving to ${download.platformFolder.folderName || download.platformFolder.platformName}...`,
+                    95,
+                    100,
+                    true
+                );
 
-                    // List files
+                const directTargetDir = Platform.OS === 'android' ? resolveAndroidPath(targetFolderUri) : null;
+
+                if (Platform.OS === 'android') {
                     const files = await ReactNativeBlobUtil.fs.ls(unzipPath);
-
-                    console.log('Unzipped files to:', unzipPath);
-
-                    // Remove the original zip file
-                    await unlink(tempFilePath);
-                
-                    // Move every file in the unzipped folder to the platform folder
                     for (const file of files) {
                         const sourcePath = `${unzipPath}/${file}`;
-                        var destinationPath = `${download.platformFolder.folderUri}/${file}`;
-                        console.log(`Moving file from ${sourcePath} to ${destinationPath}`);
-                        try {
-                            const fileStatus = await ReactNativeBlobUtil.fs.stat(sourcePath);
-                            updateDownloadProgress(destinationPath, fileStatus.size);
+                        if (directTargetDir) {
+                            const targetDirClean = directTargetDir.replace(/\/+$/, '');
+                            try {
+                                if (!(await RNFS.exists(targetDirClean))) {
+                                    await RNFS.mkdir(targetDirClean);
+                                }
+                            } catch {}
+                            const destFilePath = `${targetDirClean}/${file}`;
+                            console.log(`Direct moving extracted file from ${sourcePath} to ${destFilePath}`);
+                            try {
+                                if (await RNFS.exists(destFilePath)) {
+                                    await RNFS.unlink(destFilePath);
+                                }
+                            } catch {}
+                            await RNFS.copyFile(sourcePath, destFilePath);
+                        } else {
+                            const destinationPath = `${targetFolderUri}${file}`;
+                            console.log(`SAF moving file from ${sourcePath} to ${destinationPath}`);
                             await moveFile(sourcePath, destinationPath, { replaceIfDestinationExists: true });
-                        } catch (_) {}
+                        }
                     }
-
-                    // Remove the unzipped folder
-                    await unlink(unzipPath);
+                    try {
+                        await ReactNativeBlobUtil.fs.unlink(unzipPath);
+                        await unlink(tempFilePath);
+                    } catch {}
+                } else {
+                    const files = await FileSystem.readDirectoryAsync(unzipPath);
+                    for (const file of files) {
+                        const sourcePath = `${unzipPath}/${file}`;
+                        const destinationPath = `${targetFolderUri}${file}`;
+                        await FileSystem.moveAsync({ from: sourcePath, to: destinationPath });
+                    }
+                    await FileSystem.deleteAsync(tempFilePath, { idempotent: true });
+                    await FileSystem.deleteAsync(unzipPath, { idempotent: true });
                 }
-                else {
-                    // Unzip directly into the platform folder
-                    const unzipedFile = await unzip(tempFilePath, download.platformFolder.folderUri);
-                    console.log(`Unzipped directly to: ${unzipedFile}`);
-                    zipProgressSubscription.remove();
-                }
-
             } else {
                 updateDownload(downloadId, {
                     status: DownloadStatus.MOVING,
-                    progress: 0,
-                    endTime: new Date(),
+                    progress: 50,
                 });
+                notificationService.showProgress(
+                    notifId,
+                    `Saving ${download.romName}`,
+                    `Moving to ${download.platformFolder.folderName || download.platformFolder.platformName}...`,
+                    95,
+                    100,
+                    true
+                );
 
+                const directTargetDir = Platform.OS === 'android' ? resolveAndroidPath(targetFolderUri) : null;
 
-                // Seems to give an error despite actually moving the file correctly, just ignore the error
-                try {
-                    const sourcePath = download.platformFolder.folderUri + '/' + download.romFile.file_name;
-                    
-                    if(Platform.OS === 'android') {
-                        const fileStatus = await stat(tempFilePath);
-                        await updateDownloadProgress(sourcePath, fileStatus.size);
-                        await moveFile(tempFilePath, sourcePath, { replaceIfDestinationExists: true });
+                if (Platform.OS === 'android') {
+                    const cleanTemp = tempFilePath.replace(/^file:\/\//, '');
+                    if (directTargetDir) {
+                        const targetDirClean = directTargetDir.replace(/\/+$/, '');
+                        try {
+                            if (!(await RNFS.exists(targetDirClean))) {
+                                await RNFS.mkdir(targetDirClean);
+                            }
+                        } catch {}
+                        const destFilePath = `${targetDirClean}/${download.romFile.file_name}`;
+                        console.log(`Direct moving file from ${cleanTemp} to ${destFilePath}`);
+                        try {
+                            if (await RNFS.exists(destFilePath)) {
+                                await RNFS.unlink(destFilePath);
+                            }
+                        } catch {}
+                        await RNFS.copyFile(cleanTemp, destFilePath);
+                        try {
+                            await RNFS.unlink(cleanTemp);
+                        } catch {}
                     } else {
-                        console.log('Moving file from', tempFilePath, 'to', sourcePath);
-                        // const fileStatus = await FileSystem.getInfoAsync(tempFilePath);
-                        await updateDownloadProgress(sourcePath, 0);
-                        //console.log('File status:', fileStatus);
-                        await FileSystem.moveAsync({
-                            from: tempFilePath,
-                            to: sourcePath,
-                        });
-
+                        const destinationPath = `${targetFolderUri}${download.romFile.file_name}`;
+                        await moveFile(tempFilePath, destinationPath, { replaceIfDestinationExists: true });
                     }
-                } catch (e) {
-                    console.warn('Error moving file:', e);
+                } else {
+                    const destinationPath = `${targetFolderUri}${download.romFile.file_name}`;
+                    await FileSystem.moveAsync({
+                        from: tempFilePath,
+                        to: destinationPath,
+                    });
                 }
             }
 
-            
             updateDownload(downloadId, {
                 status: DownloadStatus.COMPLETED,
                 progress: 100,
                 endTime: new Date(),
             });
+
+            try {
+                soundService.playComplete();
+                hapticService.success();
+            } catch {}
+
+            notificationService.showCompleted(
+                notifId,
+                'Download Complete',
+                `${download.romName} (${download.romFile.file_name})`
+            );
 
             // Update the ROM file system cache to mark the ROM as downloaded
             try {
@@ -367,14 +529,18 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                 console.log(`ROM ${download.romName} marked as downloaded in filesystem cache`);
             } catch (error) {
                 console.error('Error updating ROM filesystem cache:', error);
-                // Don't fail the download completion if cache update fails
             }
-
         } catch (error) {
             console.error('Error completing download:', error);
+            const errorMessage = `Failed to save file: ${error instanceof Error ? error.message : 'Unknown error'}`;
+            notificationService.showFailed(
+                notifId,
+                'Download Failed',
+                `${download.romName}: ${errorMessage}`
+            );
             updateDownload(downloadId, {
                 status: DownloadStatus.FAILED,
-                error: `Failed to save file: ${error instanceof Error ? error.message : 'Unknown error'}`,
+                error: errorMessage,
                 endTime: new Date(),
             });
         }
@@ -396,11 +562,14 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
         d.status === DownloadStatus.CANCELLED
     );
 
-    const isRomDownloading = (romFile: RomFile): boolean => {
-        return downloads.some(d =>
-            d.romFile.rom_id === romFile.rom_id &&
-            (d.status === DownloadStatus.DOWNLOADING || d.status === DownloadStatus.PENDING)
-        );
+    const isRomDownloading = (romFile?: RomFile): boolean => {
+        if (!romFile) return false;
+        return downloads.some(d => {
+            const matchesFile = (romFile.id && d.romFile?.id === romFile.id) ||
+                (d.romFile?.file_name && d.romFile.file_name === romFile.file_name) ||
+                (!romFile.id && !d.romFile?.id && d.romFile?.rom_id === romFile.rom_id);
+            return matchesFile && (d.status === DownloadStatus.DOWNLOADING || d.status === DownloadStatus.PENDING);
+        });
     };
 
     const getDownloadById = (id: string): DownloadItem | undefined => {
@@ -415,14 +584,19 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
     };
 
     const addRomToQueue = (rom: Rom, romFile: RomFile, platformFolder: PlatformFolder): string => {
+        notificationService.requestPermission().catch(() => {});
 
-        // Check if ROM is already in queue or downloading
-        const existingDownload = downloads.find(d =>
-            d.romFile.rom_id === romFile.rom_id &&
-            (d.status === DownloadStatus.PENDING ||
+        // Check if this specific ROM file is already in queue or downloading
+        const existingDownload = downloads.find(d => {
+            const matchesFile = (romFile.id && d.romFile?.id === romFile.id) ||
+                (d.romFile?.file_name && d.romFile.file_name === romFile.file_name) ||
+                (!romFile.id && !d.romFile?.id && d.romFile?.rom_id === romFile.rom_id);
+            return matchesFile && (
+                d.status === DownloadStatus.PENDING ||
                 d.status === DownloadStatus.DOWNLOADING ||
-                d.status === DownloadStatus.PAUSED)
-        );
+                d.status === DownloadStatus.PAUSED
+            );
+        });
 
         if (existingDownload) {
             return existingDownload.id;
@@ -452,6 +626,8 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
     const removeFromQueue = (downloadId: string): void => {
         const download = downloads.find(d => d.id === downloadId);
         if (download) {
+            notificationService.cancel(notificationService.getNotificationId(downloadId));
+
             // Cancel if actively downloading
             if (download.status === DownloadStatus.DOWNLOADING) {
                 cancelDownload(downloadId);
@@ -482,10 +658,20 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
     };
 
     const clearCompleted = (): void => {
+        downloads.forEach(d => {
+            if (d.status === DownloadStatus.COMPLETED) {
+                notificationService.cancel(notificationService.getNotificationId(d.id));
+            }
+        });
         setDownloads(prev => prev.filter(d => d.status !== DownloadStatus.COMPLETED));
     };
 
     const clearFailed = (): void => {
+        downloads.forEach(d => {
+            if (d.status === DownloadStatus.FAILED || d.status === DownloadStatus.CANCELLED) {
+                notificationService.cancel(notificationService.getNotificationId(d.id));
+            }
+        });
         setDownloads(prev => prev.filter(d =>
             d.status !== DownloadStatus.FAILED &&
             d.status !== DownloadStatus.CANCELLED
@@ -495,6 +681,8 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
     const pauseDownload = async (downloadId: string): Promise<void> => {
         const download = downloads.find(d => d.id === downloadId);
         if (download && download.status === DownloadStatus.DOWNLOADING) {
+            notificationService.cancel(notificationService.getNotificationId(downloadId));
+
             if (download.downloadResumable) {
                 await download.downloadResumable.pauseAsync();
             }
@@ -530,6 +718,7 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
     const cancelDownload = (downloadId: string): void => {
         const download = downloads.find(d => d.id === downloadId);
         if (download) {
+            notificationService.cancel(notificationService.getNotificationId(downloadId));
 
             if (download.downloadResumable && download.status === DownloadStatus.DOWNLOADING) {
                 download.downloadResumable.pauseAsync();
@@ -556,6 +745,11 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
         }
     };
 
+    const retryAllFailed = (): void => {
+        const failed = downloads.filter(d => d.status === DownloadStatus.FAILED || d.status === DownloadStatus.CANCELLED);
+        failed.forEach(d => retryDownload(d.id));
+    };
+
     return (
         <DownloadContext.Provider
             value={{
@@ -568,6 +762,7 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                 addRomToQueue,
                 removeFromQueue,
                 retryDownload,
+                retryAllFailed,
                 clearCompleted,
                 clearFailed,
                 pauseDownload,
