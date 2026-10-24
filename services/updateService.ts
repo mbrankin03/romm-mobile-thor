@@ -4,7 +4,7 @@ import { Platform } from 'react-native';
 import * as Application from 'expo-application'; 
 
 
-const GITHUB_API_URL = 'https://api.github.com/repos/mattsays/romm-mobile/releases/latest';
+const GITHUB_API_URL = 'https://api.github.com/repos/mbrankin03/romm-mobile-thor/releases/latest';
 
 export interface Release {
     tag_name: string;
