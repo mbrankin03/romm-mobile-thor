@@ -437,6 +437,9 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                                 }
                             } catch {}
                             await RNFS.copyFile(sourcePath, destFilePath);
+                            try {
+                                await RNFS.scanFile(destFilePath);
+                            } catch {}
                         } else {
                             const destinationPath = `${targetFolderUri}${file}`;
                             console.log(`SAF moving file from ${sourcePath} to ${destinationPath}`);
@@ -491,6 +494,9 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                         } catch {}
                         await RNFS.copyFile(cleanTemp, destFilePath);
                         try {
+                            await RNFS.scanFile(destFilePath);
+                        } catch {}
+                        try {
                             await RNFS.unlink(cleanTemp);
                         } catch {}
                     } else {
@@ -529,6 +535,41 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                 console.log(`ROM ${download.romName} marked as downloaded in filesystem cache`);
             } catch (error) {
                 console.error('Error updating ROM filesystem cache:', error);
+            }
+
+            // Auto-generate .m3u playlist for multi-disc games if all discs are present
+            try {
+                if (download.rom && Array.isArray(download.rom.files) && download.rom.files.length > 1) {
+                    const directTargetDir = Platform.OS === 'android' ? resolveAndroidPath(targetFolderUri) : null;
+                    if (directTargetDir) {
+                        const targetDirClean = directTargetDir.replace(/\/+$/, '');
+                        const discFiles = download.rom.files.filter(f => f.file_name && !f.file_name.endsWith('.m3u'));
+                        if (discFiles.length > 1) {
+                            let allDiscsExist = true;
+                            for (const df of discFiles) {
+                                const p = `${targetDirClean}/${df.file_name}`;
+                                if (!(await RNFS.exists(p))) {
+                                    allDiscsExist = false;
+                                    break;
+                                }
+                            }
+                            if (allDiscsExist) {
+                                const baseGameName = (download.rom.fs_name || download.rom.name || 'playlist')
+                                    .replace(/\s*\((?:Disc|Disk|CD)\s*\d+[^)]*\)/gi, '')
+                                    .replace(/\s*\[(?:Disc|Disk|CD)\s*\d+[^\]]*\]/gi, '')
+                                    .trim();
+                                const m3uPath = `${targetDirClean}/${baseGameName}.m3u`;
+                                const sortedFiles = [...discFiles].sort((a, b) => (a.file_name || '').localeCompare(b.file_name || ''));
+                                const m3uContent = sortedFiles.map(f => f.file_name).join('\n') + '\n';
+                                await RNFS.writeFile(m3uPath, m3uContent, 'utf8');
+                                await RNFS.scanFile(m3uPath);
+                                console.log(`Auto-generated m3u playlist at ${m3uPath}`);
+                            }
+                        }
+                    }
+                }
+            } catch (m3uErr) {
+                console.warn('Failed to auto-generate m3u playlist:', m3uErr);
             }
         } catch (error) {
             console.error('Error completing download:', error);

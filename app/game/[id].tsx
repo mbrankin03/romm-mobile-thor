@@ -357,6 +357,39 @@ export default function GameDetailsScreen() {
         }
     };
 
+    const deletePathDirectOrSaf = async (pathOrUri: string) => {
+        try {
+            if (pathOrUri.startsWith('/') || pathOrUri.startsWith('file://')) {
+                const clean = pathOrUri.replace(/^file:\/\//, '');
+                if (await RNFS.exists(clean)) {
+                    await RNFS.unlink(clean);
+                    return true;
+                }
+            } else if (pathOrUri.startsWith('content://')) {
+                const posix = resolveAndroidPath(pathOrUri);
+                if (posix && (await RNFS.exists(posix))) {
+                    await RNFS.unlink(posix);
+                    return true;
+                }
+                await SAF.unlink(pathOrUri);
+                return true;
+            } else {
+                await FileSystem.deleteAsync(pathOrUri, { idempotent: true });
+                return true;
+            }
+        } catch (e) {
+            console.warn(`Failed to delete path ${pathOrUri}:`, e);
+            // Fallback attempt with SAF if available
+            try {
+                if (RNPlatform.OS === 'android') {
+                    await SAF.unlink(pathOrUri);
+                    return true;
+                }
+            } catch {}
+        }
+        return false;
+    };
+
     const handleDeleteFile = async (romData: Rom) => {
         const selectedFile = getSelectedFile();
         if (!selectedFile) {
@@ -378,28 +411,38 @@ export default function GameDetailsScreen() {
                     onPress: async () => {
                         try {
                             if (existingFilePath) {
-                                if (RNPlatform.OS === 'android') {
-                                    await SAF.unlink(existingFilePath);
-                                } else {
-                                    await FileSystem.deleteAsync(existingFilePath);
-                                }
+                                await deletePathDirectOrSaf(existingFilePath);
                             } else {
                                 const folders = await getAllPlatformFolders({ name: romData.platform_name, slug: romData.platform_slug } as Platform);
                                 for (const folder of folders) {
+                                    // Try direct POSIX check first
+                                    const directDir = resolveAndroidPath(folder.folderUri);
+                                    if (directDir) {
+                                        try {
+                                            const dirClean = directDir.replace(/\/+$/, '');
+                                            if (await RNFS.exists(dirClean)) {
+                                                const entries = await RNFS.readDir(dirClean);
+                                                const match = entries.find(e => matchesRomFile(e.name, selectedFile.file_name || ''));
+                                                if (match) {
+                                                    await RNFS.unlink(match.path);
+                                                    break;
+                                                }
+                                            }
+                                        } catch {}
+                                    }
+
                                     let fileList: string[] = [];
                                     if (RNPlatform.OS === 'android') {
-                                        fileList = (await SAF.listFiles(folder.folderUri)).map(f => f.name);
+                                        try {
+                                            fileList = (await SAF.listFiles(folder.folderUri)).map(f => f.name);
+                                        } catch {}
                                     } else {
                                         fileList = await FileSystem.readDirectoryAsync(folder.folderUri);
                                     }
                                     const match = fileList.find(f => matchesRomFile(f, selectedFile.file_name || ''));
                                     if (match) {
                                         const uri = folder.folderUri + '/' + match;
-                                        if (RNPlatform.OS === 'android') {
-                                            await SAF.unlink(uri);
-                                        } else {
-                                            await FileSystem.deleteAsync(uri);
-                                        }
+                                        await deletePathDirectOrSaf(uri);
                                         break;
                                     }
                                 }
@@ -435,6 +478,21 @@ export default function GameDetailsScreen() {
                             const folders = await getAllPlatformFolders({ name: rom.platform_name, slug: rom.platform_slug } as Platform);
                             for (const romFile of rom.files) {
                                 for (const folder of folders) {
+                                    const directDir = resolveAndroidPath(folder.folderUri);
+                                    if (directDir) {
+                                        try {
+                                            const dirClean = directDir.replace(/\/+$/, '');
+                                            if (await RNFS.exists(dirClean)) {
+                                                const entries = await RNFS.readDir(dirClean);
+                                                const match = entries.find(e => matchesRomFile(e.name, romFile.file_name || ''));
+                                                if (match) {
+                                                    await RNFS.unlink(match.path);
+                                                    continue;
+                                                }
+                                            }
+                                        } catch {}
+                                    }
+
                                     let fileList: string[] = [];
                                     try {
                                         if (RNPlatform.OS === 'android') {
@@ -448,11 +506,7 @@ export default function GameDetailsScreen() {
                                     const match = fileList.find(f => matchesRomFile(f, romFile.file_name || ''));
                                     if (match) {
                                         const uri = folder.folderUri + '/' + match;
-                                        if (RNPlatform.OS === 'android') {
-                                            await SAF.unlink(uri);
-                                        } else {
-                                            await FileSystem.deleteAsync(uri);
-                                        }
+                                        await deletePathDirectOrSaf(uri);
                                     }
                                 }
                             }
