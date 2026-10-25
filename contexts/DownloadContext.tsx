@@ -109,6 +109,7 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
     const [downloads, setDownloads] = useState<DownloadItem[]>([]);
     const [downloadQueue, setDownloadQueue] = useState<string[]>([]);
     const [activeDownloads, setActiveDownloads] = useState<Set<string>>(new Set());
+    const resumableMapRef = React.useRef<Map<string, FileSystem.DownloadResumable>>(new Map());
     const { refreshRomCheck } = useRomFileSystem();
 
     useEffect(() => {
@@ -281,14 +282,25 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                 }
             );
 
+            resumableMapRef.current.set(downloadId, downloadResumable);
             updateDownload(downloadId, {
                 downloadResumable,
             });
 
-            const res = await downloadResumable.downloadAsync();
+            // If resuming an interrupted download, resumeAsync() preserves already-downloaded bytes
+            let res;
+            if (download.retryCount && download.retryCount > 0) {
+                try {
+                    res = await downloadResumable.resumeAsync();
+                } catch {
+                    res = await downloadResumable.downloadAsync();
+                }
+            } else {
+                res = await downloadResumable.downloadAsync();
+            }
 
             if (res) {
-                if (res.status === 200) {
+                if (res.status === 200 || res.status === 206) {
                     await completeDownload(downloadId, tempFilePath, download);
                 } else {
                     throw new Error(`Download failed with status ${res?.status || 'unknown'}`);
@@ -724,8 +736,11 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
         if (download && download.status === DownloadStatus.DOWNLOADING) {
             notificationService.cancel(notificationService.getNotificationId(downloadId));
 
-            if (download.downloadResumable) {
-                await download.downloadResumable.pauseAsync();
+            const resumable = resumableMapRef.current.get(downloadId) || download.downloadResumable;
+            if (resumable) {
+                try {
+                    await resumable.pauseAsync();
+                } catch {}
             }
 
             updateDownload(downloadId, {
@@ -742,16 +757,20 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
                 status: DownloadStatus.DOWNLOADING,
             });
 
-            if (download.downloadResumable) {
-                await download.downloadResumable.resumeAsync().then(async (result) => {
-                    if (result) {
-                        if (result.status === 200 || result.status === 206) {
-                            await completeDownload(downloadId, FileSystem.cacheDirectory + download.romFile.file_name, download);
-                        } else {
-                            console.log(`Download failed with status ${result?.status || 'unknown'}`);
-                        }
+            const resumable = resumableMapRef.current.get(downloadId) || download.downloadResumable;
+            if (resumable) {
+                try {
+                    const result = await resumable.resumeAsync();
+                    if (result && (result.status === 200 || result.status === 206)) {
+                        await completeDownload(downloadId, FileSystem.cacheDirectory + download.romFile.file_name, download);
                     }
-                });
+                } catch (e) {
+                    console.error('Error resuming download:', e);
+                    // Add back to queue on resume failure
+                    setDownloadQueue(prev => [downloadId, ...prev.filter(id => id !== downloadId)]);
+                }
+            } else {
+                setDownloadQueue(prev => [downloadId, ...prev.filter(id => id !== downloadId)]);
             }
         }
     };
@@ -761,9 +780,13 @@ export const DownloadProvider: React.FC<DownloadProviderProps> = ({ children }) 
         if (download) {
             notificationService.cancel(notificationService.getNotificationId(downloadId));
 
-            if (download.downloadResumable && download.status === DownloadStatus.DOWNLOADING) {
-                download.downloadResumable.pauseAsync();
+            const resumable = resumableMapRef.current.get(downloadId) || download.downloadResumable;
+            if (resumable && download.status === DownloadStatus.DOWNLOADING) {
+                try {
+                    resumable.pauseAsync();
+                } catch {}
             }
+            resumableMapRef.current.delete(downloadId);
 
             // Clean up temp file if exists
             if (download.downloadResumable?.fileUri) {

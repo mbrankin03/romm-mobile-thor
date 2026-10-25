@@ -265,6 +265,24 @@ export default function GameDetailsScreen() {
             }
             return false;
         },
+        onButtonL1: () => {
+            if (rom && rom.files && rom.files.length > 1) {
+                setSelectedFileIndex(prev => (prev - 1 + rom.files.length) % rom.files.length);
+                hapticService.tick();
+                soundService.playTab();
+                return true;
+            }
+            return false;
+        },
+        onButtonR1: () => {
+            if (rom && rom.files && rom.files.length > 1) {
+                setSelectedFileIndex(prev => (prev + 1) % rom.files.length);
+                hapticService.tick();
+                soundService.playTab();
+                return true;
+            }
+            return false;
+        },
         onBack: () => {
             if (showVersionSelector) {
                 setShowVersionSelector(false);
@@ -1261,6 +1279,7 @@ export default function GameDetailsScreen() {
             </Modal>
             <GamepadHints hints={[
                 { button: 'A', label: 'Download / Action' },
+                ...(isMultiFile ? [{ button: 'L1/R1' as const, label: 'Switch Disc' }] : []),
                 { button: 'Y', label: isRomFav ? 'Favorited' : 'Favorite' },
                 { button: 'B', label: 'Back' },
             ]} />
