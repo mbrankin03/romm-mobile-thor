@@ -152,6 +152,14 @@ export default function PlatformScreen() {
     // Dynamic columns based on screen orientation and device size
     const { columns, cardWidth, isLandscape } = useDynamicColumns();
 
+    const cardHeight = Math.floor(cardWidth * 1.4);
+    const itemHeight = cardHeight + 24;
+    const getItemLayout = useCallback((_: any, index: number) => ({
+        length: itemHeight,
+        offset: itemHeight * Math.floor(index / columns),
+        index,
+    }), [itemHeight, columns]);
+
     const platformId = Number(platform);
 
     const selectedPlatform = currentPlatform?.name;
@@ -584,6 +592,11 @@ export default function PlatformScreen() {
                     columnWrapperStyle={columns > 1 ? styles.row : undefined}
                     contentContainerStyle={styles.gamesContainer}
                     showsVerticalScrollIndicator={false}
+                    getItemLayout={getItemLayout}
+                    removeClippedSubviews={false}
+                    windowSize={11}
+                    maxToRenderPerBatch={columns * 3}
+                    initialNumToRender={columns * 3}
                     onScroll={(e) => {
                         scrollOffsetRef.current = e.nativeEvent.contentOffset.y;
                     }}

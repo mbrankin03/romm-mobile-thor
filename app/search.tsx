@@ -49,6 +49,14 @@ export default function SearchScreen() {
     const { completedDownloads, isRomDownloading } = useDownload();
     const { isRomDownloaded, isCheckingRom, refreshRomCheck } = useRomFileSystem();
     const { columns, cardWidth, isLandscape } = useDynamicColumns();
+
+    const cardHeight = Math.floor(cardWidth * 1.4);
+    const itemHeight = cardHeight + 24;
+    const getItemLayout = useCallback((_: any, index: number) => ({
+        length: itemHeight,
+        offset: itemHeight * Math.floor(index / columns),
+        index,
+    }), [itemHeight, columns]);
     const {
         roms: searchResults,
         loading,
@@ -429,6 +437,11 @@ export default function SearchScreen() {
                                     columnWrapperStyle={columns > 1 ? styles.row : undefined}
                                     contentContainerStyle={styles.resultsList}
                                     showsVerticalScrollIndicator={false}
+                                    getItemLayout={getItemLayout}
+                                    removeClippedSubviews={false}
+                                    windowSize={11}
+                                    maxToRenderPerBatch={columns * 3}
+                                    initialNumToRender={columns * 3}
                                     ListFooterComponent={renderFooter}
                                     onEndReached={handleEndReached}
                                     onEndReachedThreshold={0.1}
